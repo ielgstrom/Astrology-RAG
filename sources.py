@@ -50,10 +50,6 @@ def load_source(ref: str, *, quiet: bool = False) -> list[Document]:
     raise FileNotFoundError(f"No such file, directory, or URL: {ref}")
 
 
-# --------------------------------------------------------------------------- #
-# Files
-# --------------------------------------------------------------------------- #
-
 def _load_file(path: Path) -> list[Document]:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -113,10 +109,6 @@ def _load_docx(path: Path) -> list[Document]:
     return docs
 
 
-# --------------------------------------------------------------------------- #
-# Directories
-# --------------------------------------------------------------------------- #
-
 def _load_directory(root: Path, *, quiet: bool = False) -> list[Document]:
     docs: list[Document] = []
     skipped: list[str] = []
@@ -146,10 +138,6 @@ def _is_hidden_or_skipped(path: Path, root: Path) -> bool:
     parts = path.relative_to(root).parts
     return any(part in SKIP_DIRS or part.startswith(".") for part in parts)
 
-
-# --------------------------------------------------------------------------- #
-# URLs
-# --------------------------------------------------------------------------- #
 
 def _load_url(url: str) -> list[Document]:
     try:
