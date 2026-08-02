@@ -1,64 +1,54 @@
 # FutureReader
 
-A small LangChain wrapper around a local [Ollama](https://ollama.com) model that
-answers questions about files, directories, and web pages. Nothing leaves the
-machine and there is no API key.
+Una vidente en la terminal. Preguntale por tu horóscopo o por lo que te espera y
+te responderá como toda buena adivina: en tono misterioso y sin concretar
+demasiado.
 
-## Setup
+Funciona con un modelo [Ollama](https://ollama.com) local: nada sale de tu
+máquina y no hace falta ninguna API key.
+
+## Instalación
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-ollama serve            # if it is not already running
-ollama pull llama3.2    # or whatever model you want to use
+ollama serve            # si no está ya arrancado
+ollama pull llama3.2    # o el modelo que prefieras
 ```
 
-## Use
+## Cómo usarlo
 
 ```sh
-# one question
-python FutureReader.py notes.md report.pdf -q "What are the open risks?"
+python FutureReader.py
+```
+A partir de aqui te conducirá a un chat con una vidente virtual. Para acabar con el chat puedes escribir:
 
-# interactive, with follow-up questions that remember the conversation
-python FutureReader.py ./docs https://example.com/spec
+```
+quit
 ```
 
-As a library:
+Como librería:
 
-```python
-from FutureReader import FutureReader
+## Cómo funciona
 
-reader = FutureReader()
-reader.add("notes.md", "./docs", "https://example.com/spec")
-print(reader.ask("Summarise the three main themes."))
-```
+- `SYSTEM_PROMPT` en [FutureReader.py](FutureReader.py) le da el papel: solo
+  habla del futuro. Si le preguntas por el pasado o el presente, contesta
+  *"The future is my concert, thus I cannot answer that question."*
+- Las fuentes que cargues (por ejemplo
+  [astrology-sign-meanings.pdf](astrology-sign-meanings.pdf), con el
+  significado de cada signo) se meten enteras en el prompt para que las
+  respuestas tengan algo de base astrológica. Sin vector store ni chunking.
+- Formatos admitidos: texto plano y markdown, `.pdf`, `.docx`, URLs y
+  directorios completos.
 
-## What it does
+## Opciones
 
-Sources are loaded into `Document`s and stuffed whole into the prompt — no
-vector store, no chunking. That works as long as everything fits in the model's
-context window (`--num-ctx`); past that, add retrieval.
-
-| Source | Handled by |
+| Opción | Para qué sirve |
 | --- | --- |
-| `.txt`, `.md`, code, config, any UTF-8 text | direct read |
-| `.pdf` | `PyPDFLoader` (needs `pypdf`) |
-| `.docx` | `Docx2txtLoader` (needs `docx2txt`) |
-| `http(s)://` | `WebBaseLoader` (needs `beautifulsoup4`) |
-| a directory | walked recursively, skipping hidden dirs, `node_modules`, `.venv`, etc. |
-
-## Notes
-
-- Default model is `llama3.2`. Override with `--model` (anything in
-  `ollama list` works).
-- **`--num-ctx` is the setting that matters.** Ollama's own default is 2048
-  tokens and it silently drops everything past the limit, so the tool defaults
-  to 16384 and warns when the loaded sources come close to filling it. Raise it
-  for large source sets, lower it if you run out of RAM.
-- `--num-predict` caps the answer length (`-1` for unlimited);
-  `--temperature` defaults to 0 for grounded answers.
-- `--base-url` points at a remote Ollama server; it defaults to `$OLLAMA_HOST`,
-  then `http://localhost:11434`.
-- Small models cite less reliably than large ones. If citations get sloppy, try
-  a bigger model before rewriting `SYSTEM_PROMPT`.
+| `--model` | modelo de Ollama (por defecto `llama3.2`) |
+| `--num-ctx` | tamaño del contexto en tokens (por defecto 2048); súbelo si cargas fuentes grandes, porque Ollama recorta en silencio lo que no cabe |
+| `--num-predict` | longitud máxima de la respuesta (`-1` = sin límite) |
+| `--temperature` | temperatura de la respuesta; alto = más ambiguo |
+| `--base-url` | servidor de Ollama remoto (por defecto `$OLLAMA_HOST`) |
+| `--no-stream` | espera la respuesta entera en vez de irla escribiendo |

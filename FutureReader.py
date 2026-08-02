@@ -119,10 +119,6 @@ class FutureReader:
         self.history.extend([HumanMessage(question), AIMessage(answer)])
 
 
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
-
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="FutureReader",
