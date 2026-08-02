@@ -54,8 +54,6 @@ def _load_file(path: Path) -> list[Document]:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return _load_pdf(path)
-    if suffix == ".docx":
-        return _load_docx(path)
     return [Document(page_content=_read_text(path), metadata={"source": str(path)})]
 
 
@@ -89,24 +87,6 @@ def _load_pdf(path: Path) -> list[Document]:
         for i, page in enumerate(pages)
     )
     return [Document(page_content=body, metadata={"source": str(path)})]
-
-
-def _load_docx(path: Path) -> list[Document]:
-    try:
-        from langchain_community.document_loaders import Docx2txtLoader
-    except ImportError as exc:  # pragma: no cover - depends on install
-        raise UnsupportedSourceError(
-            "Reading .docx needs langchain-community. Run: pip install langchain-community docx2txt"
-        ) from exc
-
-    try:
-        docs = Docx2txtLoader(str(path)).load()
-    except ImportError as exc:
-        raise UnsupportedSourceError("Reading .docx needs docx2txt. Run: pip install docx2txt") from exc
-
-    for doc in docs:
-        doc.metadata["source"] = str(path)
-    return docs
 
 
 def _load_directory(root: Path, *, quiet: bool = False) -> list[Document]:

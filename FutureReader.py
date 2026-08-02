@@ -5,12 +5,19 @@ import sys
 from typing import Iterator, Sequence
 
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import BaseTool
 from langchain_ollama import ChatOllama
 
 from sources import describe, load_sources
+from tools import DEFAULT_TOOLS, asks_for_card
 
 DEFAULT_MODEL = "llama3.2"
 
@@ -27,7 +34,43 @@ DEFAULT_NUM_CTX = 2048
 DEFAULT_NUM_PREDICT = 4_096
 
 # Grounded answers over fixed sources: no reason to sample creatively.
-DEFAULT_TEMPERATURE = 0.3
+DEFAULT_TEMPERATURE = 0.1
+
+# How many times a single question may bounce back for tool calls before we
+# force an answer. Small models sometimes loop on the same tool forever.
+MAX_TOOL_ROUNDS = 4
+
+# Printed once at startup. Kept as plain ASCII/box-drawing so it survives any
+# terminal that can show the rest of the session; colour is added separately and
+# only when we are actually attached to a TTY.
+BANNER = r"""
+   ███████╗██╗   ██╗████████╗██╗   ██╗██████╗ ███████╗
+   ██╔════╝██║   ██║╚══██╔══╝██║   ██║██╔══██╗██╔════╝
+   █████╗  ██║   ██║   ██║   ██║   ██║██████╔╝█████╗
+   ██╔══╝  ██║   ██║   ██║   ██║   ██║██╔══██╗██╔══╝
+   ██║     ╚██████╔╝   ██║   ╚██████╔╝██║  ██║███████╗
+   ╚═╝      ╚═════╝    ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝
+      ██████╗ ███████╗ █████╗ ██████╗ ███████╗██████╗
+      ██╔══██╗██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗
+      ██████╔╝█████╗  ███████║██║  ██║█████╗  ██████╔╝
+      ██╔══██╗██╔══╝  ██╔══██║██║  ██║██╔══╝  ██╔══██╗
+      ██║  ██║███████╗██║  ██║██████╔╝███████╗██║  ██║
+      ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝
+"""
+
+TAROT_SPREAD = r"""
+          *      .          .         *        .
+           .---------.  .---------.  .---------.
+           |    *    |  |   .-.   |  |    |    |
+           |  *   *  |  |  / | \  |  |  \ | /  |
+           | *  *  * |  | (--+--) |  |-- (o) --|
+           |  *   *  |  |  \ | /  |  |  / | \  |
+           |    *    |  |   '-'   |  |    |    |
+           |         |  |         |  |         |
+           |THE STAR |  |THE WHEEL|  | THE SUN |
+           '---------'  '---------'  '---------'
+      .           *            .          *        .
+"""
 
 SYSTEM_PROMPT = """You are a psychic old woman that can read the future. You must follow the following rules:
 - If you are asked anything not related to the future, you must answer "The future is my concern, thus I cannot answer that question."
@@ -49,7 +92,13 @@ zodiac sign: {sign}
 
 Every prophecy you give must be read through the traits of that sign, as
 described in the sources. Never ask the person for their sign — you already
-know it."""
+know it.
+
+You keep a tarot deck hidden, but it stays wrapped in its cloth unless it is asked
+for. Use the draw_tarot_card tool only when the person explicitly asks for a
+card or a tarot spread, and then build the prophecy around whatever
+it gives you. Every other question they ask you, you answer from the sources and their sign
+alone, without touching the deck. Never name a card you did not draw."""
 
 
 class FutureReader:
@@ -63,6 +112,8 @@ class FutureReader:
         temperature: float = DEFAULT_TEMPERATURE,
         system_prompt: str = SYSTEM_PROMPT,
         base_url: str | None = None,
+        tools: Sequence[BaseTool] | None = None,
+        trace_tools: bool = False,
         **model_kwargs,
     ) -> None:
         # base_url=None lets the ollama client fall back to $OLLAMA_HOST, or
@@ -76,6 +127,12 @@ class FutureReader:
             base_url=base_url,
             **model_kwargs,
         )
+        self.tools = list(DEFAULT_TOOLS if tools is None else tools)
+        self.tools_by_name = {t.name: t for t in self.tools}
+        self.trace_tools = trace_tools
+        # Bare llm when there is nothing to bind: sending an empty tool list
+        # still costs schema tokens on some backends.
+        self.llm_with_tools = self.llm.bind_tools(self.tools) if self.tools else self.llm
         self.prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", system_prompt),
@@ -83,7 +140,6 @@ class FutureReader:
                 ("human", "{question}"),
             ]
         )
-        self.chain = self.prompt | self.llm | StrOutputParser()
         self.documents: list[Document] = []
         self.history: list[BaseMessage] = []
         # Re-rendered into the system prompt on every turn, so it never ages out
@@ -113,18 +169,73 @@ class FutureReader:
         )
 
     def ask(self, question: str, *, remember: bool = True) -> str:
-        answer = self.chain.invoke(self._inputs(question))
+        messages = self.prompt.invoke(self._inputs(question)).to_messages()
+        llm = self._llm_for(question)
+        for _ in range(MAX_TOOL_ROUNDS):
+            reply = llm.invoke(messages)
+            if not getattr(reply, "tool_calls", None):
+                answer = str(reply.content)
+                break
+            messages.append(reply)
+            messages.extend(self._call_tools(reply.tool_calls))
+        else:
+            # The model kept reaching for tools. Ask once more without them so
+            # the turn ends in an answer instead of another round trip.
+            answer = str(self.llm.invoke(messages).content)
         if remember:
             self._remember(question, answer)
         return answer
 
     def stream(self, question: str, *, remember: bool = True) -> Iterator[str]:
+        messages = self.prompt.invoke(self._inputs(question)).to_messages()
+        llm = self._llm_for(question)
         chunks: list[str] = []
-        for chunk in self.chain.stream(self._inputs(question)):
-            chunks.append(chunk)
-            yield chunk
+        for _ in range(MAX_TOOL_ROUNDS):
+            # Ollama sends either tool calls or prose, so a round that turns out
+            # to be a tool call has yielded nothing to the caller by this point.
+            gathered: AIMessageChunk | None = None
+            for chunk in llm.stream(messages):
+                gathered = chunk if gathered is None else gathered + chunk
+                if isinstance(chunk.content, str) and chunk.content:
+                    chunks.append(chunk.content)
+                    yield chunk.content
+            if gathered is None or not gathered.tool_calls:
+                break
+            messages.append(gathered)
+            messages.extend(self._call_tools(gathered.tool_calls))
         if remember:
             self._remember(question, "".join(chunks))
+
+    def _llm_for(self, question: str):
+        """Hand over the deck only when the question actually asks for a card.
+
+        A 3B model calls whatever tool it can see, however firmly the prompt
+        tells it not to, so the deck is withheld at the API boundary instead:
+        no schema in the request, no card in the answer.
+        """
+        if self.tools and asks_for_card(question):
+            return self.llm_with_tools
+        return self.llm
+
+    def _call_tools(self, tool_calls: Sequence[dict]) -> list[ToolMessage]:
+        """Run everything the model asked for and package the results.
+
+        Failures come back as text rather than raising: the model can recover
+        from "that tool does not exist", but a traceback ends the session.
+        """
+        results: list[ToolMessage] = []
+        for call in tool_calls:
+            requested = self.tools_by_name.get(call["name"])
+            if requested is None:
+                output = f"error: there is no tool named {call['name']}"
+            else:
+                try:
+                    output = str(requested.invoke(call["args"]))
+                except Exception as exc:  # noqa: BLE001 - hand it back to the model
+                    output = f"error: {exc}"
+            print(_paint(f"Card drawn: {output} \n", "31"), file=sys.stderr)
+            results.append(ToolMessage(content=output, tool_call_id=call["id"]))
+        return results
 
     def used_tokens(self, question: str = "") -> int:
         """Rough token count of the whole prompt as it would be sent right now.
@@ -214,13 +325,50 @@ def _report_context(reader: FutureReader, verbose: bool = False) -> None:
         )
 
 
-def _hint(exc: Exception, model: str) -> None:
+def _show_error_hint(exc: Exception, model: str) -> None:
     """Turn the two usual Ollama failures into something actionable."""
     message = str(exc).lower()
     if "connect" in message or "refused" in message:
         print("Is the Ollama server up? Start it with: ollama serve", file=sys.stderr)
     elif "not found" in message or "no such model" in message:
         print(f"Model not pulled yet. Run: ollama pull {model}", file=sys.stderr)
+
+ZODIAC_GLYPHS = {
+    "Aries": "♈",
+    "Taurus": "♉",
+    "Gemini": "♊",
+    "Cancer": "♋",
+    "Leo": "♌",
+    "Virgo": "♍",
+    "Libra": "♎",
+    "Scorpio": "♏",
+    "Sagittarius": "♐",
+    "Capricorn": "♑",
+    "Aquarius": "♒",
+    "Pisces": "♓",
+}
+
+
+def _paint(text: str, code: str, stream=sys.stderr) -> str:
+    """Wrap text in an ANSI colour, but only when someone is there to see it.
+
+    Piping the banner into a file or another program should not litter it with
+    escape sequences, so anything that is not a TTY gets the plain text back.
+    """
+    if not stream.isatty():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _print_banner() -> None:
+    """Curtain-raiser for the session: title, a spread, and a line of flavour."""
+    print(_paint(BANNER, "1;35"), file=sys.stderr)
+    print(_paint(TAROT_SPREAD, "36"), file=sys.stderr)
+    print(
+        _paint("        ~ the mists part · ask, and the future answers ~\n", "2;37"),
+        file=sys.stderr,
+    )
+
 
 def get_horoscope_sign() -> str:
     """Return the user's horoscope sign based on their birth date."""
@@ -264,6 +412,8 @@ def get_horoscope_sign() -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _print_banner()
+
     try:
         from dotenv import load_dotenv
 
@@ -279,6 +429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_predict=args.num_predict,
         temperature=args.temperature,
         base_url=args.base_url,
+        trace_tools=args.verbose,
     )
 
     refs = list(DEFAULT_SOURCES)
@@ -289,9 +440,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"Loaded {describe(reader.documents)}\n", file=sys.stderr)
+    if args.verbose:
+        print(f"Loaded {describe(reader.documents)}\n", file=sys.stderr)
     reader.sign = get_horoscope_sign()
-    print(f"Your sign: {reader.sign}\n", file=sys.stderr)
+    glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
+    print(_paint(f"Your sign: {glyph}  {reader.sign}\n", "1;33"), file=sys.stderr)
     _report_context(reader, args.verbose)
 
     def answer(question: str) -> None:
@@ -304,16 +457,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print()
         except Exception as exc:  # noqa: BLE001 - surface anything the server says
             print(f"\nerror: {exc}", file=sys.stderr)
-            _hint(exc, args.model)
+            _show_error_hint(exc, args.model)
             return
-        # After _remember(), so this is what the *next* question starts from.
         _report_context(reader, args.verbose)
 
-    if args.question:
-        answer(args.question)
-        return 0
 
-    print("Ask a question (Ctrl-D or 'exit' to quit).", file=sys.stderr)
+    print("Ask a question (Ctrl-D or 'exit' to quit).")
     while True:
         try:
             question = input("\n> ").strip()

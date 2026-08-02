@@ -28,20 +28,6 @@ A partir de aqui te conducirá a un chat con una vidente virtual. Para acabar co
 quit
 ```
 
-Como librería:
-
-## Cómo funciona
-
-- `SYSTEM_PROMPT` en [FutureReader.py](FutureReader.py) le da el papel: solo
-  habla del futuro. Si le preguntas por el pasado o el presente, contesta
-  *"The future is my concert, thus I cannot answer that question."*
-- Las fuentes que cargues (por ejemplo
-  [astrology-sign-meanings.pdf](astrology-sign-meanings.pdf), con el
-  significado de cada signo) se meten enteras en el prompt para que las
-  respuestas tengan algo de base astrológica. Sin vector store ni chunking.
-- Formatos admitidos: texto plano y markdown, `.pdf`, `.docx`, URLs y
-  directorios completos.
-
 ## Opciones
 
 | Opción | Para qué sirve |
