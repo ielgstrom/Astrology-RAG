@@ -52,3 +52,4 @@ Como librería:
 | `--temperature` | temperatura de la respuesta; alto = más ambiguo |
 | `--base-url` | servidor de Ollama remoto (por defecto `$OLLAMA_HOST`) |
 | `--no-stream` | espera la respuesta entera en vez de irla escribiendo |
+| `--verbose` | Muestra mensajes de consumo de tokens de la sesión|
