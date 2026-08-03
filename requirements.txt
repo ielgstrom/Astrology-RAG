@@ -1,3 +1,4 @@
+langchain>=1.0            # create_agent
 langchain-core>=0.3
 langchain-ollama>=0.2
 langchain-community>=0.3
@@ -5,5 +6,4 @@ python-dotenv>=1.0
 
 # Optional, per source type:
 pypdf>=5.0             # .pdf
-docx2txt>=0.8          # .docx
 beautifulsoup4>=4.12   # http(s):// URLs

@@ -4,16 +4,21 @@ import argparse
 import sys
 from typing import Iterator, Sequence
 
+from langchain.agents import create_agent
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelRequest,
+    dynamic_prompt,
+    wrap_model_call,
+    wrap_tool_call,
+)
 from langchain_core.documents import Document
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
     BaseMessage,
     HumanMessage,
-    ToolMessage,
 )
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.tools import BaseTool
 from langchain_ollama import ChatOllama
 
 from sources import describe, load_sources
@@ -61,13 +66,13 @@ BANNER = r"""
 TAROT_SPREAD = r"""
           *      .          .         *        .
            .---------.  .---------.  .---------.
-           |    *    |  |   .-.   |  |    |    |
-           |  *   *  |  |  / | \  |  |  \ | /  |
-           | *  *  * |  | (--+--) |  |-- (o) --|
-           |  *   *  |  |  \ | /  |  |  / | \  |
-           |    *    |  |   '-'   |  |    |    |
+           |    *    |  | /\_^_// |  |    |    |
+           |  *   *  |  | \|===|  |  |  \ | /  |
+           | *  *  * |  |  |o o// |  |-- (o) --|
+           |  *   *  |  |  |o o|  |  |  / | \  |
+           |    *    |  |  |_n_|  |  |    |    |
            |         |  |         |  |         |
-           |THE STAR |  |THE WHEEL|  | THE SUN |
+           |THE STAR |  |THE TOWER|  | THE SUN |
            '---------'  '---------'  '---------'
       .           *            .          *        .
 """
@@ -101,6 +106,30 @@ it gives you. Every other question they ask you, you answer from the sources and
 alone, without touching the deck. Never name a card you did not draw."""
 
 
+def _latest_question(messages: Sequence[BaseMessage]) -> str:
+    """The question this turn is answering.
+
+    Tool rounds append to the same message list, so the question has to be
+    fished back out of it rather than passed down: it is the last thing the
+    person actually said.
+    """
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return message.text
+    return ""
+
+
+def _tool_rounds(messages: Sequence[BaseMessage]) -> int:
+    """How many times the model has already reached for a tool this turn."""
+    rounds = 0
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break  # anything older belongs to an earlier turn
+        if isinstance(message, AIMessage) and message.tool_calls:
+            rounds += 1
+    return rounds
+
+
 class FutureReader:
     """Holds a set of loaded sources and answers questions about them."""
 
@@ -110,14 +139,9 @@ class FutureReader:
         num_ctx: int = DEFAULT_NUM_CTX,
         num_predict: int = DEFAULT_NUM_PREDICT,
         temperature: float = DEFAULT_TEMPERATURE,
-        system_prompt: str = SYSTEM_PROMPT,
         base_url: str | None = None,
-        tools: Sequence[BaseTool] | None = None,
         trace_tools: bool = False,
-        **model_kwargs,
     ) -> None:
-        # base_url=None lets the ollama client fall back to $OLLAMA_HOST, or
-        # http://localhost:11434 if that is unset.
         self.num_ctx = num_ctx
         self.llm = ChatOllama(
             model=model,
@@ -125,26 +149,21 @@ class FutureReader:
             num_predict=num_predict,
             temperature=temperature,
             base_url=base_url,
-            **model_kwargs,
         )
-        self.tools = list(DEFAULT_TOOLS if tools is None else tools)
-        self.tools_by_name = {t.name: t for t in self.tools}
+        self.tools = list(DEFAULT_TOOLS)
         self.trace_tools = trace_tools
-        # Bare llm when there is nothing to bind: sending an empty tool list
-        # still costs schema tokens on some backends.
-        self.llm_with_tools = self.llm.bind_tools(self.tools) if self.tools else self.llm
-        self.prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                MessagesPlaceholder("history"),
-                ("human", "{question}"),
-            ]
-        )
         self.documents: list[Document] = []
         self.history: list[BaseMessage] = []
-        # Re-rendered into the system prompt on every turn, so it never ages out
-        # of the conversation the way a message in `history` would.
         self.sign: str = "unknown"
+        self.agent = create_agent(
+            self.llm,
+            tools=self.tools,
+            middleware=[
+                self._prompt_middleware(),
+                self._deck_middleware(),
+                self._trace_middleware(),
+            ],
+        )
 
     def add(self, refs: Sequence[str], quiet: bool = False) -> int:
         """Load files, directories, or URLs. Returns the number of docs added."""
@@ -169,90 +188,106 @@ class FutureReader:
         )
 
     def ask(self, question: str, *, remember: bool = True) -> str:
-        messages = self.prompt.invoke(self._inputs(question)).to_messages()
-        llm = self._llm_for(question)
-        for _ in range(MAX_TOOL_ROUNDS):
-            reply = llm.invoke(messages)
-            if not getattr(reply, "tool_calls", None):
-                answer = str(reply.content)
-                break
-            messages.append(reply)
-            messages.extend(self._call_tools(reply.tool_calls))
-        else:
-            # The model kept reaching for tools. Ask once more without them so
-            # the turn ends in an answer instead of another round trip.
-            answer = str(self.llm.invoke(messages).content)
+        """The whole answer at once, in one non-streaming request.
+
+        Same agent and same middleware as `stream`; only the transport differs.
+        The turn always ends on a prophecy rather than a tool result — the deck
+        middleware sees to that — so the last message is the answer.
+        """
+        result = self.agent.invoke(self._state(question))
+        answer = result["messages"][-1].text
         if remember:
             self._remember(question, answer)
         return answer
 
     def stream(self, question: str, *, remember: bool = True) -> Iterator[str]:
-        messages = self.prompt.invoke(self._inputs(question)).to_messages()
-        llm = self._llm_for(question)
+        """Run one turn through the agent, yielding prose as it arrives.
+
+        stream_mode="messages" gives token-level chunks from every model call in
+        the turn, tool rounds included. Rounds that end in a tool call carry no
+        text, so nothing reaches the caller until the model finally speaks.
+        """
         chunks: list[str] = []
-        for _ in range(MAX_TOOL_ROUNDS):
-            # Ollama sends either tool calls or prose, so a round that turns out
-            # to be a tool call has yielded nothing to the caller by this point.
-            gathered: AIMessageChunk | None = None
-            for chunk in llm.stream(messages):
-                gathered = chunk if gathered is None else gathered + chunk
-                if isinstance(chunk.content, str) and chunk.content:
-                    chunks.append(chunk.content)
-                    yield chunk.content
-            if gathered is None or not gathered.tool_calls:
-                break
-            messages.append(gathered)
-            messages.extend(self._call_tools(gathered.tool_calls))
+        for chunk, _metadata in self.agent.stream(self._state(question), stream_mode="messages"):
+            if isinstance(chunk, AIMessageChunk) and chunk.text:
+                chunks.append(chunk.text)
+                yield chunk.text
         if remember:
             self._remember(question, "".join(chunks))
 
-    def _llm_for(self, question: str):
+    def _state(self, question: str) -> dict[str, object]:
+        """The turn handed to the agent: the conversation so far, plus this.
+
+        The sources and the sign are not in here — the prompt middleware puts
+        them in the system message on every call, so they never age out.
+        """
+        return {"messages": [*self.history, HumanMessage(question)]}
+
+    def _prompt_middleware(self) -> AgentMiddleware:
+        """Rebuild the system prompt before every model call.
+
+        The sources and the sign are read off `self` each time rather than
+        frozen into the agent, so `add` and a late-arriving sign both take
+        effect without rebuilding the graph.
+        """
+
+        @dynamic_prompt
+        def render(request: ModelRequest) -> str:
+            return SYSTEM_PROMPT.format(context=self.context, sign=self.sign)
+
+        return render
+
+    def _deck_middleware(self) -> AgentMiddleware:
         """Hand over the deck only when the question actually asks for a card.
 
         A 3B model calls whatever tool it can see, however firmly the prompt
         tells it not to, so the deck is withheld at the API boundary instead:
-        no schema in the request, no card in the answer.
+        no schema in the request, no card in the answer. The same override ends
+        a turn that keeps reaching for tools — once MAX_TOOL_ROUNDS cards have
+        been drawn the next call goes out empty-handed, so the turn finishes in
+        a prophecy instead of another round trip.
         """
-        if self.tools and asks_for_card(question):
-            return self.llm_with_tools
-        return self.llm
 
-    def _call_tools(self, tool_calls: Sequence[dict]) -> list[ToolMessage]:
-        """Run everything the model asked for and package the results.
+        @wrap_model_call
+        def offer_deck(request: ModelRequest, handler):
+            if (
+                self.tools
+                and asks_for_card(_latest_question(request.messages))
+                and _tool_rounds(request.messages) < MAX_TOOL_ROUNDS
+            ):
+                return handler(request)
+            return handler(request.override(tools=[]))
 
-        Failures come back as text rather than raising: the model can recover
-        from "that tool does not exist", but a traceback ends the session.
-        """
-        results: list[ToolMessage] = []
-        for call in tool_calls:
-            requested = self.tools_by_name.get(call["name"])
-            if requested is None:
-                output = f"error: there is no tool named {call['name']}"
-            else:
-                try:
-                    output = str(requested.invoke(call["args"]))
-                except Exception as exc:  # noqa: BLE001 - hand it back to the model
-                    output = f"error: {exc}"
-            print(_paint(f"Card drawn: {output} \n", "31"), file=sys.stderr)
-            results.append(ToolMessage(content=output, tool_call_id=call["id"]))
-        return results
+        return offer_deck
+
+    def _trace_middleware(self) -> AgentMiddleware:
+        """Echo each draw to stderr under --verbose."""
+
+        @wrap_tool_call
+        def trace(request, handler):
+            result = handler(request)
+            if self.trace_tools:
+                drawn = getattr(result, "text", result)
+                print(_paint(f"Card drawn: {drawn} \n", "31"), file=sys.stderr)
+            return result
+
+        return trace
 
     def used_tokens(self, question: str = "") -> int:
         """Rough token count of the whole prompt as it would be sent right now.
 
-        Renders the template so the estimate covers the system prompt, the
-        sources, and the accumulated history — not just the documents.
+        Mirrors what the prompt middleware builds, so the estimate covers the
+        system prompt, the sources, and the accumulated history — not just the
+        documents.
         """
-        rendered = self.prompt.invoke(self._inputs(question)).to_string()
+        rendered = "\n".join(
+            [
+                SYSTEM_PROMPT.format(context=self.context, sign=self.sign),
+                *(message.text for message in self.history),
+                question,
+            ]
+        )
         return len(rendered) // 4  # ~4 chars per token, good enough here
-
-    def _inputs(self, question: str) -> dict[str, object]:
-        return {
-            "context": self.context,
-            "sign": self.sign,
-            "history": self.history,
-            "question": question,
-        }
 
     def _remember(self, question: str, answer: str) -> None:
         self.history.extend([HumanMessage(question), AIMessage(answer)])

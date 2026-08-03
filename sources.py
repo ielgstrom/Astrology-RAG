@@ -42,30 +42,15 @@ def load_source(ref: str, *, quiet: bool = False) -> list[Document]:
         return _load_url(ref)
 
     path = Path(ref).expanduser()
-    if path.is_dir():
-        return _load_directory(path, quiet=quiet)
-    if path.is_file():
-        return _load_file(path)
-
-    raise FileNotFoundError(f"No such file, directory, or URL: {ref}")
+    
+    return _load_file(path)
 
 
 def _load_file(path: Path) -> list[Document]:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return _load_pdf(path)
-    return [Document(page_content=_read_text(path), metadata={"source": str(path)})]
-
-
-def _read_text(path: Path) -> str:
-    """Read a file as UTF-8, rejecting anything that is clearly binary."""
-    raw = path.read_bytes()
-    if b"\x00" in raw[:8192]:
-        raise UnsupportedSourceError(f"{path} looks like a binary file")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise UnsupportedSourceError(f"{path} is not valid UTF-8 text") from exc
+    return UnsupportedSourceError(f"{path} is not a supported source type; only .pdf is supported")
 
 
 def _load_pdf(path: Path) -> list[Document]:
@@ -87,36 +72,6 @@ def _load_pdf(path: Path) -> list[Document]:
         for i, page in enumerate(pages)
     )
     return [Document(page_content=body, metadata={"source": str(path)})]
-
-
-def _load_directory(root: Path, *, quiet: bool = False) -> list[Document]:
-    docs: list[Document] = []
-    skipped: list[str] = []
-
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or _is_hidden_or_skipped(path, root):
-            continue
-        if path.stat().st_size > MAX_WALK_FILE_BYTES:
-            skipped.append(f"{path} (too large)")
-            continue
-        try:
-            docs.extend(_load_file(path))
-        except (UnsupportedSourceError, OSError) as exc:
-            skipped.append(f"{path} ({exc})")
-
-    if skipped and not quiet:
-        print(f"Skipped {len(skipped)} file(s) under {root}:", file=sys.stderr)
-        for line in skipped[:10]:
-            print(f"  - {line}", file=sys.stderr)
-        if len(skipped) > 10:
-            print(f"  ... and {len(skipped) - 10} more", file=sys.stderr)
-
-    return docs
-
-
-def _is_hidden_or_skipped(path: Path, root: Path) -> bool:
-    parts = path.relative_to(root).parts
-    return any(part in SKIP_DIRS or part.startswith(".") for part in parts)
 
 
 def _load_url(url: str) -> list[Document]:
