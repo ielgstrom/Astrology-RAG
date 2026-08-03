@@ -1,0 +1,17 @@
+# Entorno virtual
+.venv/
+
+# Secretos: .env lleva la clave real y nunca se sube.
+# .env.example sí se sube — es la plantilla sin secretos.
+.env
+.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
