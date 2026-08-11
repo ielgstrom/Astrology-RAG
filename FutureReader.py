@@ -43,7 +43,7 @@ DEFAULT_TEMPERATURE = 0.1
 
 # How many times a single question may bounce back for tool calls before we
 # force an answer. Small models sometimes loop on the same tool forever.
-MAX_TOOL_ROUNDS = 4
+MAX_TOOL_ROUNDS = 2
 
 # Printed once at startup. Kept as plain ASCII/box-drawing so it survives any
 # terminal that can show the rest of the session; colour is added separately and
