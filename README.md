@@ -22,7 +22,19 @@ ollama pull llama3.2    # o el modelo que prefieras
 ```sh
 python FutureReader.py
 ```
-A partir de aqui te conducirá a un chat con una vidente virtual. Para acabar con el chat puedes escribir:
+Lo primero que te preguntará es qué lectura quieres:
+
+```
+  1) A spread of three cards
+  2) A reading of your sign
+```
+
+Con **1** reparte tres cartas (pasado / presente / futuro) y construye la lectura
+sobre ellas. Con **2** lee lo que dicen los astros para tu signo. En ambos casos
+te pedirá la fecha de nacimiento, porque toda profecía se lee a través del signo.
+
+Después te conducirá a un chat con la vidente, donde puedes seguir preguntando.
+Para acabar con el chat puedes escribir:
 
 ```
 quit
@@ -33,7 +45,7 @@ quit
 | Opción | Para qué sirve |
 | --- | --- |
 | `--model` | modelo de Ollama (por defecto `llama3.2`) |
-| `--num-ctx` | tamaño del contexto en tokens (por defecto 2048); súbelo si cargas fuentes grandes, porque Ollama recorta en silencio lo que no cabe |
+| `--num-ctx` | tamaño del contexto en tokens (por defecto 8192); súbelo si cargas fuentes grandes, porque Ollama recorta en silencio lo que no cabe — y cuando recorta, la vidente empieza a nombrar cartas que nunca salieron |
 | `--num-predict` | longitud máxima de la respuesta (`-1` = sin límite) |
 | `--temperature` | temperatura de la respuesta; alto = más ambiguo |
 | `--base-url` | servidor de Ollama remoto (por defecto `$OLLAMA_HOST`) |

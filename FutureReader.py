@@ -22,7 +22,7 @@ from langchain_core.messages import (
 from langchain_ollama import ChatOllama
 
 from sources import describe, load_sources
-from tools import DEFAULT_TOOLS, asks_for_card
+from tools import DEFAULT_TOOLS, asks_for_card, draw_spread
 
 DEFAULT_MODEL = "llama3.2"
 
@@ -32,8 +32,11 @@ DEFAULT_SOURCES = ["astrology-sign-meanings.pdf"]
 
 # Ollama's own default context is only 2048 tokens and anything past it is
 # silently dropped — fatal for a tool that stuffs whole documents into the
-# prompt. Raise --num-ctx for big source sets, lower it if you run out of RAM.
-DEFAULT_NUM_CTX = 2048
+# prompt. The built-in astrology PDF alone is ~1,350 tokens, which left a card
+# reading with barely a hundred to spare and got the tail of the system prompt
+# cut off: the model would then deal itself cards that were never drawn. Raise
+# this further for big source sets, lower it if you run out of RAM.
+DEFAULT_NUM_CTX = 8192
 
 # Tokens to generate. -1 means "until the model stops".
 DEFAULT_NUM_PREDICT = 4_096
@@ -99,11 +102,34 @@ Every prophecy you give must be read through the traits of that sign, as
 described in the sources. Never ask the person for their sign — you already
 know it.
 
-You keep a tarot deck hidden, but it stays wrapped in its cloth unless it is asked
+{deck}"""
+
+# How the prompt ends when no cards have been dealt: the deck exists, but the
+# model has to ask for it through the tool.
+DECK_WRAPPED = """You keep a tarot deck hidden, but it stays wrapped in its cloth unless it is asked
 for. Use the draw_tarot_card tool only when the person explicitly asks for a
 card or a tarot spread, and then build the prophecy around whatever
 it gives you. Every other question they ask you, you answer from the sources and their sign
 alone, without touching the deck. Never name a card you did not draw."""
+
+# How it ends once a spread is on the table. This replaces the paragraph above
+# rather than joining it: telling the reader to draw cards while three are
+# already face up is a contradiction, and a 3B model resolves it by inventing
+# a fresh deck of its own.
+DECK_DEALT = """You have already dealt these three cards, face up on the table:
+
+<spread>
+{cards}
+</spread>
+
+Those three are the whole reading. Speak of each one by name, in its position,
+and of nothing else. The deck is spent, so there is no further card to draw or
+to name.
+
+A spread runs from what has passed, through what stands now, to what is coming:
+the first two cards are how the third is read. Reading them is telling the
+future, so the rule about the past and the present does not apply here, and you
+never refuse a question about these three cards."""
 
 
 def _latest_question(messages: Sequence[BaseMessage]) -> str:
@@ -155,6 +181,9 @@ class FutureReader:
         self.documents: list[Document] = []
         self.history: list[BaseMessage] = []
         self.sign: str = "unknown"
+        # Cards dealt at the start of the session, as (position, card) pairs.
+        # Empty when the querent came for a reading of their sign instead.
+        self.spread: list[tuple[str, str]] = []
         self.agent = create_agent(
             self.llm,
             tools=self.tools,
@@ -186,6 +215,23 @@ class FutureReader:
             )
             for doc in self.documents
         )
+
+    @property
+    def deck_block(self) -> str:
+        """How the prompt ends: cards on the table, or a deck still wrapped.
+
+        The dealt cards go in the prompt rather than through a tool result
+        because they were drawn before the first question — there is no
+        decision left for the model to make about them.
+        """
+        if not self.spread:
+            return DECK_WRAPPED
+        return DECK_DEALT.format(cards=self.cards_text)
+
+    @property
+    def cards_text(self) -> str:
+        """The spread as lines of `position: card`."""
+        return "\n".join(f"{position}: {card}" for position, card in self.spread)
 
     def ask(self, question: str, *, remember: bool = True) -> str:
         """The whole answer at once, in one non-streaming request.
@@ -233,9 +279,19 @@ class FutureReader:
 
         @dynamic_prompt
         def render(request: ModelRequest) -> str:
-            return SYSTEM_PROMPT.format(context=self.context, sign=self.sign)
+            return self._render_prompt()
 
         return render
+
+    def _render_prompt(self) -> str:
+        """The system prompt as it stands right now.
+
+        One place, so the middleware and the token estimate can never drift
+        apart about what is actually being sent.
+        """
+        return SYSTEM_PROMPT.format(
+            context=self.context, sign=self.sign, deck=self.deck_block
+        )
 
     def _deck_middleware(self) -> AgentMiddleware:
         """Hand over the deck only when the question actually asks for a card.
@@ -282,7 +338,7 @@ class FutureReader:
         """
         rendered = "\n".join(
             [
-                SYSTEM_PROMPT.format(context=self.context, sign=self.sign),
+                self._render_prompt(),
                 *(message.text for message in self.history),
                 question,
             ]
@@ -446,6 +502,49 @@ def get_horoscope_sign() -> str:
     return "unknown"
 
 
+READING_CARDS = "cards"
+READING_SIGN = "sign"
+
+# What the opening menu accepts for each reading. The number is the documented
+# way in; the words are there so someone who types "cartas" or "tarot" instead
+# of "1" is not told they answered wrong.
+READING_WORDS = {
+    READING_CARDS: {
+        "1", "cards", "card", "tarot", "spread",
+        "cartas", "carta", "tirada", "baraja",
+    },
+    READING_SIGN: {
+        "2", "sign", "horoscope", "zodiac", "stars",
+        "signo", "horoscopo", "zodiaco", "astros",
+    },
+}
+
+# The question each reading opens with. The card reading repeats the spread it
+# already carries in the system prompt: with a whole PDF of sources in between,
+# restating the three cards right next to the question is what actually stops a
+# small model from reaching for a card it never drew.
+OPENING_QUESTION = {
+    READING_CARDS: (
+        "Read the three cards you dealt me, and only these three:\n"
+        "{cards}\n"
+        "Name each one in its position."
+    ),
+    READING_SIGN: "Read what my sign says of the days ahead.",
+}
+
+
+def choose_reading() -> str:
+    """Ask which of the two readings the person has come for."""
+    print(_paint("  1) A spread of three cards", "36"), file=sys.stderr)
+    print(_paint("  2) A reading of your sign\n", "36"), file=sys.stderr)
+    while True:
+        choice = input("What do you seek? [1/2] ").strip().lower()
+        for reading, words in READING_WORDS.items():
+            if choice in words:
+                return reading
+        print("Answer 1 or 2.", file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _print_banner()
 
@@ -477,9 +576,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.verbose:
         print(f"Loaded {describe(reader.documents)}\n", file=sys.stderr)
-    reader.sign = get_horoscope_sign()
+
+    # Both readings are given through the querent's sign, so the birth date is
+    # asked for either way. Walking out at either prompt is not an error.
+    try:
+        reading = choose_reading()
+        reader.sign = get_horoscope_sign()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+
     glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
     print(_paint(f"Your sign: {glyph}  {reader.sign}\n", "1;33"), file=sys.stderr)
+
+    if reading == READING_CARDS:
+        reader.spread = draw_spread()
+        for position, card in reader.spread:
+            print(_paint(f"  {position} — {card}", "1;35"), file=sys.stderr)
+        print(file=sys.stderr)
+
     _report_context(reader, args.verbose)
 
     def answer(question: str) -> None:
@@ -496,8 +611,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return
         _report_context(reader, args.verbose)
 
+    # The reading the person chose, given before they say anything themselves.
+    answer(OPENING_QUESTION[reading].format(cards=reader.cards_text))
 
-    print("Ask a question (Ctrl-D or 'exit' to quit).")
+    print("\nAsk a question (Ctrl-D or 'exit' to quit).")
     while True:
         try:
             question = input("\n> ").strip()

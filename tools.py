@@ -15,6 +15,7 @@ from __future__ import annotations
 import random
 import re
 import unicodedata
+from typing import Sequence
 
 from langchain_core.tools import tool
 
@@ -49,6 +50,20 @@ MAJOR_ARCANA: dict[str, str] = {
 # Roughly the usual split: reversed cards are the minority in a real spread.
 REVERSED_ODDS = 0.35
 
+# The classic three-card layout, in the order the cards are dealt.
+SPREAD_POSITIONS = ("What has passed", "What stands now", "What is coming")
+
+
+def _draw_one(name: str) -> str:
+    """Describe one named card, upright or reversed."""
+    meaning = MAJOR_ARCANA[name]
+    if random.random() < REVERSED_ODDS:
+        return (
+            f"{name}, reversed — {meaning}; reversed, so read it as blocked, "
+            "delayed, resisted, or turned inward."
+        )
+    return f"{name}, upright — {meaning}."
+
 
 @tool
 def draw_tarot_card() -> str:
@@ -60,14 +75,20 @@ def draw_tarot_card() -> str:
     fell upright or reversed, and its keywords. When a card is called for, it
     must come from here: never invent one or guess which one was drawn.
     """
-    name = random.choice(list(MAJOR_ARCANA))
-    meaning = MAJOR_ARCANA[name]
-    if random.random() < REVERSED_ODDS:
-        return (
-            f"{name}, reversed — {meaning}; reversed, so read it as blocked, "
-            "delayed, resisted, or turned inward."
-        )
-    return f"{name}, upright — {meaning}."
+    return _draw_one(random.choice(list(MAJOR_ARCANA)))
+
+
+def draw_spread(positions: Sequence[str] = SPREAD_POSITIONS) -> list[tuple[str, str]]:
+    """Deal one card per position, with no card repeating.
+
+    Deliberately a plain function and not a tool. By the time this runs the
+    querent has already picked a card reading from the opening menu, so there is
+    nothing left for the model to decide — and per the note at the top of this
+    file, what is known before the call belongs in the prompt rather than in a
+    round-trip a small model may or may not make.
+    """
+    names = random.sample(list(MAJOR_ARCANA), len(positions))
+    return [(position, _draw_one(name)) for position, name in zip(positions, names)]
 
 
 # Everything bound to the model by default. Import this rather than the
