@@ -42,7 +42,7 @@ DEFAULT_NUM_CTX = 8192
 DEFAULT_NUM_PREDICT = 4_096
 
 # Grounded answers over fixed sources: no reason to sample creatively.
-DEFAULT_TEMPERATURE = 0.1
+DEFAULT_TEMPERATURE = 100
 
 # How many times a single question may bounce back for tool calls before we
 # force an answer. Small models sometimes loop on the same tool forever.
@@ -80,6 +80,10 @@ TAROT_SPREAD = r"""
       .           *            .          *        .
 """
 
+# Stands in for the matter of the reading when nobody has named one — a phrase
+# rather than "unknown", so the prompt still reads as a sentence.
+DEFAULT_TOPIC = "whatever the days ahead may hold for them"
+
 SYSTEM_PROMPT = """You are a psychic old woman that can read the future. You must follow the following rules:
 - If you are asked anything not related to the future, you must answer "The future is my concern, thus I cannot answer that question."
 - Only answer questions about the future. If you are asked a question about the past or present, you must answer "The future is my concern, thus I cannot answer that question."
@@ -90,17 +94,20 @@ SYSTEM_PROMPT = """You are a psychic old woman that can read the future. You mus
 {context}
 </sources>
 
-The zodiac sign block below is the single most important fact about the person
-you are speaking to. It goes last, after the sources, so it stays closest to
-the question and is never buried by the documents.
+The block below holds the two most important facts about the person you are
+speaking to: their sign, and the matter they came to ask about. It goes last,
+after the sources, so it stays closest to the question and is never buried by
+the documents.
 
 <querent>
 zodiac sign: {sign}
+what they came to ask about: {topic}
 </querent>
 
 Every prophecy you give must be read through the traits of that sign, as
-described in the sources. Never ask the person for their sign — you already
-know it.
+described in the sources, and must speak to the matter they came to ask about.
+Never ask the person for their sign or for what they seek — you already know
+both.
 
 {deck}"""
 
@@ -112,24 +119,27 @@ card or a tarot spread, and then build the prophecy around whatever
 it gives you. Every other question they ask you, you answer from the sources and their sign
 alone, without touching the deck. Never name a card you did not draw."""
 
-# How it ends once a spread is on the table. This replaces the paragraph above
-# rather than joining it: telling the reader to draw cards while three are
+# How it ends once cards are on the table. This replaces the paragraph above
+# rather than joining it: telling the reader to draw cards while some are
 # already face up is a contradiction, and a 3B model resolves it by inventing
-# a fresh deck of its own.
-DECK_DEALT = """You have already dealt these three cards, face up on the table:
+# a fresh deck of its own. Only the cards turned so far are listed — they are
+# revealed one at a time, and a card the model has not been shown yet is one it
+# cannot spoil.
+DECK_DEALT = """These cards are face up on the table, in the order they were turned:
 
 <spread>
 {cards}
 </spread>
 
-Those three are the whole reading. Speak of each one by name, in its position,
-and of nothing else. The deck is spent, so there is no further card to draw or
-to name.
+Those are the whole reading. Speak of them by name, in their position, and of
+nothing else. There is no further card to draw or to name, and you never guess
+at one still face down. Every card is read upon the matter the querent came to
+ask about, and upon nothing else.
 
 A spread runs from what has passed, through what stands now, to what is coming:
-the first two cards are how the third is read. Reading them is telling the
+the earlier cards are how the later ones are read. Reading them is telling the
 future, so the rule about the past and the present does not apply here, and you
-never refuse a question about these three cards."""
+never refuse a question about these cards."""
 
 
 def _latest_question(messages: Sequence[BaseMessage]) -> str:
@@ -181,8 +191,12 @@ class FutureReader:
         self.documents: list[Document] = []
         self.history: list[BaseMessage] = []
         self.sign: str = "unknown"
-        # Cards dealt at the start of the session, as (position, card) pairs.
-        # Empty when the querent came for a reading of their sign instead.
+        # What the querent came to ask about, in their own words. Asked for
+        # before the deck is touched, so the cards are read upon it.
+        self.topic: str = DEFAULT_TOPIC
+        # Cards already turned face up, as (position, card) pairs, in the order
+        # they were revealed. Grows one card at a time as the reading is given,
+        # and stays empty when the querent came for a reading of their sign.
         self.spread: list[tuple[str, str]] = []
         self.agent = create_agent(
             self.llm,
@@ -221,8 +235,8 @@ class FutureReader:
         """How the prompt ends: cards on the table, or a deck still wrapped.
 
         The dealt cards go in the prompt rather than through a tool result
-        because they were drawn before the first question — there is no
-        decision left for the model to make about them.
+        because they were drawn before the question that reads them — there is
+        no decision left for the model to make about them.
         """
         if not self.spread:
             return DECK_WRAPPED
@@ -290,7 +304,10 @@ class FutureReader:
         apart about what is actually being sent.
         """
         return SYSTEM_PROMPT.format(
-            context=self.context, sign=self.sign, deck=self.deck_block
+            context=self.context,
+            sign=self.sign,
+            topic=self.topic,
+            deck=self.deck_block,
         )
 
     def _deck_middleware(self) -> AgentMiddleware:
@@ -302,12 +319,18 @@ class FutureReader:
         a turn that keeps reaching for tools — once MAX_TOOL_ROUNDS cards have
         been drawn the next call goes out empty-handed, so the turn finishes in
         a prophecy instead of another round trip.
+
+        A spread already on the table withholds it outright. Those questions
+        name cards by definition, so the word test alone would hand over the
+        deck on every one of them, and a fourth card drawn mid-reading is
+        exactly what the dealt-spread prompt swears does not exist.
         """
 
         @wrap_model_call
         def offer_deck(request: ModelRequest, handler):
             if (
                 self.tools
+                and not self.spread
                 and asks_for_card(_latest_question(request.messages))
                 and _tool_rounds(request.messages) < MAX_TOOL_ROUNDS
             ):
@@ -519,18 +542,46 @@ READING_WORDS = {
     },
 }
 
-# The question each reading opens with. The card reading repeats the spread it
-# already carries in the system prompt: with a whole PDF of sources in between,
-# restating the three cards right next to the question is what actually stops a
-# small model from reaching for a card it never drew.
-OPENING_QUESTION = {
-    READING_CARDS: (
-        "Read the three cards you dealt me, and only these three:\n"
-        "{cards}\n"
-        "Name each one in its position."
-    ),
-    READING_SIGN: "Read what my sign says of the days ahead.",
-}
+# The question the sign reading opens with.
+SIGN_QUESTION = (
+    "I have come to ask about this: {topic}\n"
+    "Read what my sign says of it in the days ahead."
+)
+
+# Asked once per card, as it is turned. Like the spread block in the system
+# prompt, this repeats the card verbatim: with a whole PDF of sources in
+# between, restating it right next to the question is what actually stops a
+# small model from reading a card nobody dealt.
+CARD_QUESTION = (
+    "I have come to ask about this: {topic}\n"
+    "You have just turned the card for «{position}»:\n"
+    "{card}\n"
+    "Read this one card alone, and what it says of what I asked about. Say "
+    "nothing of the cards still face down."
+)
+
+# Asked after the last card, so the three are finally read as one spread —
+# which is the whole point of a three-card layout, and something no single-card
+# reading can say on its own.
+CLOSING_QUESTION = (
+    "I have come to ask about this: {topic}\n"
+    "Now the whole spread lies open:\n"
+    "{cards}\n"
+    "Tie the cards together into one prophecy, and name no other."
+)
+
+
+def ask_topic() -> str:
+    """Ask what the reading is about, before a single card is turned.
+
+    Taken in the querent's own words rather than from a menu: it goes into the
+    prompt as-is, and a vague answer makes for a vague prophecy either way.
+    """
+    while True:
+        topic = input("What would you have the future speak of? ").strip()
+        if topic:
+            return topic
+        print("Name the matter you come for.", file=sys.stderr)
 
 
 def choose_reading() -> str:
@@ -578,22 +629,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Loaded {describe(reader.documents)}\n", file=sys.stderr)
 
     # Both readings are given through the querent's sign, so the birth date is
-    # asked for either way. Walking out at either prompt is not an error.
+    # asked for either way, and both are read upon the matter they come with —
+    # which is why the topic is asked for before the deck is touched below.
+    # Walking out at any of these prompts is not an error.
     try:
         reading = choose_reading()
         reader.sign = get_horoscope_sign()
+        reader.topic = ask_topic()
     except (EOFError, KeyboardInterrupt):
         print()
         return 0
-
-    glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
-    print(_paint(f"Your sign: {glyph}  {reader.sign}\n", "1;33"), file=sys.stderr)
-
-    if reading == READING_CARDS:
-        reader.spread = draw_spread()
-        for position, card in reader.spread:
-            print(_paint(f"  {position} — {card}", "1;35"), file=sys.stderr)
-        print(file=sys.stderr)
+    if reader.sign != "unknown":
+        glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
+        print(_paint(f"Your sign: {glyph}  {reader.sign}", "1;33"), file=sys.stderr)
+    print(_paint(f"You seek: {reader.topic}\n", "1;33"), file=sys.stderr)
 
     _report_context(reader, args.verbose)
 
@@ -612,7 +661,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         _report_context(reader, args.verbose)
 
     # The reading the person chose, given before they say anything themselves.
-    answer(OPENING_QUESTION[reading].format(cards=reader.cards_text))
+    if reading == READING_CARDS:
+        # The whole spread is dealt in one call, so no card can repeat, but the
+        # cards are turned over one at a time: each is printed, read on its own,
+        # and only then added to what the prompt admits is on the table.
+        for position, card in draw_spread():
+            print(_paint(f"\n  {position} — {card}\n", "1;35"), file=sys.stderr)
+            reader.spread.append((position, card))
+            answer(
+                CARD_QUESTION.format(
+                    position=position, card=card, topic=reader.topic
+                )
+            )
+        answer(CLOSING_QUESTION.format(cards=reader.cards_text, topic=reader.topic))
+    else:
+        answer(SIGN_QUESTION.format(topic=reader.topic))
 
     print("\nAsk a question (Ctrl-D or 'exit' to quit).")
     while True:
