@@ -1,6 +1,7 @@
 langchain>=1.0            # create_agent
 langchain-core>=0.3
-langchain-ollama>=0.2
+langchain-ollama>=0.2      # --provider ollama (local)
+langchain-mistralai>=0.2   # --provider mistral (API key)
 langchain-community>=0.3
 python-dotenv>=1.0
 

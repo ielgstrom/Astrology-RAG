@@ -4,15 +4,33 @@ Una vidente en la terminal. Preguntale por tu horóscopo o por lo que te espera 
 te responderá como toda buena adivina: en tono misterioso y sin concretar
 demasiado.
 
-Funciona con un modelo [Ollama](https://ollama.com) local: nada sale de tu
-máquina y no hace falta ninguna API key.
+Funciona con dos motores, y elige solo:
+
+- **[Mistral](https://mistral.ai)** (`mistral-small-latest`): hace falta una API
+  key, pero el modelo es mucho más grande y sigue mejor el hilo de la lectura.
+  Se usa por defecto **si hay una key en el entorno**.
+- **[Ollama](https://ollama.com)** local (`llama3.2`): nada sale de tu máquina y
+  no hace falta ninguna key. Es a lo que recurre cuando no hay key.
+
+Con `--provider mistral` o `--provider ollama` fuerzas uno u otro.
 
 ## Instalación
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+```
 
+Para usar Mistral, copia `.env.example` a `.env` y pon tu key
+([console.mistral.ai](https://console.mistral.ai/api-keys)):
+
+```sh
+MISTRAL_API_KEY=...
+```
+
+Para usar el modelo local en su lugar:
+
+```sh
 ollama serve            # si no está ya arrancado
 ollama pull llama3.2    # o el modelo que prefieras
 ```
@@ -44,10 +62,11 @@ quit
 
 | Opción | Para qué sirve |
 | --- | --- |
-| `--model` | modelo de Ollama (por defecto `llama3.2`) |
-| `--num-ctx` | tamaño del contexto en tokens (por defecto 8192); súbelo si cargas fuentes grandes, porque Ollama recorta en silencio lo que no cabe — y cuando recorta, la vidente empieza a nombrar cartas que nunca salieron |
+| `--provider` | `auto` (por defecto), `mistral` u `ollama`. `auto` = Mistral si hay key, Ollama si no |
+| `--model` | modelo a usar (por defecto `mistral-small-latest` en Mistral, `llama3.2` en Ollama) |
+| `--num-ctx` | tamaño del contexto en tokens (8192 en Ollama, 32768 en Mistral); súbelo si cargas fuentes grandes, porque Ollama recorta en silencio lo que no cabe — y cuando recorta, la vidente empieza a nombrar cartas que nunca salieron. En Mistral la ventana la pone el servidor, así que este número solo sirve para el aviso de consumo |
 | `--num-predict` | longitud máxima de la respuesta (`-1` = sin límite) |
-| `--temperature` | temperatura de la respuesta; alto = más ambiguo |
-| `--base-url` | servidor de Ollama remoto (por defecto `$OLLAMA_HOST`) |
+| `--temperature` | temperatura de la respuesta; alto = más ambiguo. Mistral no admite más de `1.0` y recorta ahí |
+| `--base-url` | servidor de Ollama remoto (por defecto `$OLLAMA_HOST`); no aplica a Mistral |
 | `--no-stream` | espera la respuesta entera en vez de irla escribiendo |
 | `--verbose` | Muestra mensajes de consumo de tokens de la sesión|

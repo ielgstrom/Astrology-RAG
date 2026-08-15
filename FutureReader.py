@@ -19,30 +19,19 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
 )
-from langchain_ollama import ChatOllama
-
+import models
 from sources import describe, load_sources
 from tools import DEFAULT_TOOLS, asks_for_card, draw_spread
-
-DEFAULT_MODEL = "llama3.2"
 
 # Sources always loaded, whatever the user passes on the command line. Anything
 # given as a positional argument is added on top of these.
 DEFAULT_SOURCES = ["astrology-sign-meanings.pdf"]
 
-# Ollama's own default context is only 2048 tokens and anything past it is
-# silently dropped — fatal for a tool that stuffs whole documents into the
-# prompt. The built-in astrology PDF alone is ~1,350 tokens, which left a card
-# reading with barely a hundred to spare and got the tail of the system prompt
-# cut off: the model would then deal itself cards that were never drawn. Raise
-# this further for big source sets, lower it if you run out of RAM.
-DEFAULT_NUM_CTX = 8192
-
 # Tokens to generate. -1 means "until the model stops".
 DEFAULT_NUM_PREDICT = 4_096
 
 # Grounded answers over fixed sources: no reason to sample creatively.
-DEFAULT_TEMPERATURE = 100
+DEFAULT_TEMPERATURE = 0.2
 
 # How many times a single question may bounce back for tool calls before we
 # force an answer. Small models sometimes loop on the same tool forever.
@@ -171,17 +160,24 @@ class FutureReader:
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
-        num_ctx: int = DEFAULT_NUM_CTX,
+        provider: str = models.DEFAULT_PROVIDER,
+        model: str | None = None,
+        num_ctx: int | None = None,
         num_predict: int = DEFAULT_NUM_PREDICT,
         temperature: float = DEFAULT_TEMPERATURE,
         base_url: str | None = None,
         trace_tools: bool = False,
     ) -> None:
-        self.num_ctx = num_ctx
-        self.llm = ChatOllama(
-            model=model,
-            num_ctx=num_ctx,
+        # Settled here rather than in the signature: which backend answers
+        # decides both the model name and the context budget, and `auto` is not
+        # resolved until the environment has been read.
+        self.provider = models.resolve_provider(provider)
+        self.model = model or models.default_model(self.provider)
+        self.num_ctx = num_ctx if num_ctx is not None else models.default_num_ctx(self.provider)
+        self.llm = models.build_llm(
+            self.provider,
+            self.model,
+            num_ctx=self.num_ctx,
             num_predict=num_predict,
             temperature=temperature,
             base_url=base_url,
@@ -375,7 +371,10 @@ class FutureReader:
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="FutureReader",
-        description="Ask a local Ollama model questions about files, directories, and web pages.",
+        description=(
+            "Ask a local Ollama model or Mistral's API questions about files, "
+            "directories, and web pages."
+        ),
     )
     parser.add_argument(
         "sources",
@@ -386,12 +385,38 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("-q", "--question", help="ask one question and exit")
-    parser.add_argument( "--model", default=DEFAULT_MODEL, help=f"default: {DEFAULT_MODEL}")
+    parser.add_argument(
+        "--provider",
+        choices=models.PROVIDERS,
+        default=models.DEFAULT_PROVIDER,
+        help=(
+            "which backend answers (default: auto — Mistral when a key is in "
+            "the environment, the local Ollama model otherwise)"
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "default: "
+            + ", ".join(
+                f"{name} on {provider}"
+                for provider, name in models.DEFAULT_MODELS.items()
+            )
+        ),
+    )
     parser.add_argument(
         "--num-ctx",
         type=int,
-        default=DEFAULT_NUM_CTX,
-        help=f"context window in tokens (default: {DEFAULT_NUM_CTX})",
+        default=None,
+        help=(
+            "context window in tokens (default: "
+            + ", ".join(
+                f"{size:,} on {provider}"
+                for provider, size in models.DEFAULT_NUM_CTX.items()
+            )
+            + "); on Mistral this only sets what the usage report counts against"
+        ),
     )
     parser.add_argument(
         "--num-predict",
@@ -402,7 +427,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--temperature", type=float, default=DEFAULT_TEMPERATURE, help=f"default: {DEFAULT_TEMPERATURE}"
     )
-    parser.add_argument("--base-url", default=None, help="Ollama server, default $OLLAMA_HOST")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Ollama server, default $OLLAMA_HOST (ignored on Mistral)",
+    )
     parser.add_argument("--no-stream", action="store_true", help="wait for the full answer")
     parser.add_argument(
         "-v",
@@ -431,21 +460,24 @@ def _report_context(reader: FutureReader, verbose: bool = False) -> None:
             file=sys.stderr,
         )
     if ratio > 0.8 and verbose:
+        truncates = models.truncates_silently(reader.provider)
         print(
-            "warning: the prompt is close to --num-ctx. Ollama will silently "
-            "truncate it — raise --num-ctx, load fewer sources, or restart to "
-            "drop the history.",
+            "warning: the prompt is close to --num-ctx. "
+            + (
+                "Ollama will silently truncate it — "
+                if truncates
+                else "The server may refuse it — "
+            )
+            + "raise --num-ctx, load fewer sources, or restart to drop the history.",
             file=sys.stderr,
         )
 
 
-def _show_error_hint(exc: Exception, model: str) -> None:
-    """Turn the two usual Ollama failures into something actionable."""
-    message = str(exc).lower()
-    if "connect" in message or "refused" in message:
-        print("Is the Ollama server up? Start it with: ollama serve", file=sys.stderr)
-    elif "not found" in message or "no such model" in message:
-        print(f"Model not pulled yet. Run: ollama pull {model}", file=sys.stderr)
+def _show_error_hint(exc: Exception, reader: FutureReader) -> None:
+    """Turn each backend's usual failure into something actionable."""
+    hint = models.error_hint(exc, reader.provider, reader.model)
+    if hint:
+        print(hint, file=sys.stderr)
 
 ZODIAC_GLYPHS = {
     "Aries": "♈",
@@ -608,14 +640,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = _parse_args(argv)
 
-    reader = FutureReader(
-        model=args.model,
-        num_ctx=args.num_ctx,
-        num_predict=args.num_predict,
-        temperature=args.temperature,
-        base_url=args.base_url,
-        trace_tools=args.verbose,
-    )
+    try:
+        reader = FutureReader(
+            provider=args.provider,
+            model=args.model,
+            num_ctx=args.num_ctx,
+            num_predict=args.num_predict,
+            temperature=args.temperature,
+            base_url=args.base_url,
+            trace_tools=args.verbose,
+        )
+    except (ValueError, ImportError) as exc:
+        # A missing key or a backend whose package was never installed. Both
+        # are fixed before the session starts, not during it.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.verbose:
+        print(
+            f"Reading with {reader.model} on {reader.provider}\n", file=sys.stderr
+        )
 
     refs = list(DEFAULT_SOURCES)
     refs.extend(args.sources)
@@ -656,7 +699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print()
         except Exception as exc:  # noqa: BLE001 - surface anything the server says
             print(f"\nerror: {exc}", file=sys.stderr)
-            _show_error_hint(exc, args.model)
+            _show_error_hint(exc, reader)
             return
         _report_context(reader, args.verbose)
 
