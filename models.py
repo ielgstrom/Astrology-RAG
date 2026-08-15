@@ -26,9 +26,6 @@ DEFAULT_PROVIDER = AUTO
 
 DEFAULT_MODELS = {
     OLLAMA: "llama3.2",
-    # Small is the cheap end of the hosted range and still an order of
-    # magnitude past llama3.2 at following a long prompt. Swap it for
-    # mistral-medium-latest or mistral-large-latest with --model.
     MISTRAL: "mistral-small-latest",
 }
 
