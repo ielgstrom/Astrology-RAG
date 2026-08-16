@@ -678,15 +678,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Walking out at any of these prompts is not an error.
     try:
         reading = choose_reading()
-        reader.sign = get_horoscope_sign()
-        reader.topic = ask_topic()
+        if reading == READING_CARDS:
+            reader.topic = ask_topic()
+        if reading == READING_SIGN:
+            reader.sign = get_horoscope_sign()
     except (EOFError, KeyboardInterrupt):
         print()
         return 0
-    if reader.sign != "unknown":
+    if reading == READING_SIGN:
         glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
         print(_paint(f"Your sign: {glyph}  {reader.sign}", "1;33"), file=sys.stderr)
-    print(_paint(f"You seek: {reader.topic}\n", "1;33"), file=sys.stderr)
+    if reading == READING_CARDS:
+        print(_paint(f"You seek: {reader.topic}\n", "1;33"), file=sys.stderr)
 
     _report_context(reader, args.verbose)
 
