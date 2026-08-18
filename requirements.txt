@@ -5,6 +5,11 @@ langchain-mistralai>=0.2   # --provider mistral (API key)
 langchain-community>=0.3
 python-dotenv>=1.0
 
+# Web API. Only needed to serve the reader over HTTP; the CLI runs without them.
+fastapi>=0.115
+uvicorn[standard]>=0.30    # the server that runs it
+sse-starlette>=2.1         # streams the prophecy token by token
+
 # Optional, per source type:
 pypdf>=5.0             # .pdf
 beautifulsoup4>=4.12   # http(s):// URLs

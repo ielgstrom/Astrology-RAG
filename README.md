@@ -38,7 +38,7 @@ ollama pull llama3.2    # o el modelo que prefieras
 ## Cómo usarlo
 
 ```sh
-python FutureReader.py
+python cli.py
 ```
 Lo primero que te preguntará es qué lectura quieres:
 
@@ -70,3 +70,28 @@ quit
 | `--base-url` | servidor de Ollama remoto (por defecto `$OLLAMA_HOST`); no aplica a Mistral |
 | `--no-stream` | espera la respuesta entera en vez de irla escribiendo |
 | `--verbose` | Muestra mensajes de consumo de tokens de la sesión|
+
+## La misma vidente por HTTP
+
+La lectura vive en `FutureReader.py` y no sabe nada de dónde se lee. `cli.py` la
+saca por la terminal; `api.py` la sirve por HTTP para que la lea un navegador:
+
+```sh
+uvicorn api:app --reload
+```
+
+| Endpoint | Qué hace |
+| --- | --- |
+| `GET /health` | qué motor respondería ahora mismo |
+| `POST /sessions` | abre una lectura (`reading`, `topic`, `birth_date`) y devuelve el `session_id`, el signo y las cartas repartidas |
+| `GET /sessions/{id}/reading` | la lectura entera en streaming (SSE) |
+| `GET /sessions/{id}/ask?q=…` | una pregunta libre, también en streaming |
+
+Los dos endpoints de streaming hablan **Server-Sent Events**, que en el navegador
+se leen con `EventSource`. Cada trama va nombrada: `card` cuando se voltea una
+carta, `chunk` por cada trozo de texto, `answer_end` al acabar una respuesta,
+`end` al acabar la lectura y `error` si el motor falla.
+
+Las sesiones viven en memoria: un reinicio se las lleva todas y ninguna caduca.
+
+Los docs interactivos quedan en `http://127.0.0.1:8000/docs`.

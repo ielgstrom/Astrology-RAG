@@ -1,7 +1,15 @@
+"""The reader itself: sources, prompt, agent, and the shape of a reading.
+
+Nothing in here reads stdin or writes to the terminal. Two front ends drive it —
+`cli.py` for the terminal session and `api.py` for the browser — and both go
+through the same methods, so a change to how a spread is read only has to be
+made once.
+"""
+
 from __future__ import annotations
 
-import argparse
 import sys
+from datetime import date
 from typing import Iterator, Sequence
 
 from langchain.agents import create_agent
@@ -36,38 +44,6 @@ DEFAULT_TEMPERATURE = 0.2
 # How many times a single question may bounce back for tool calls before we
 # force an answer. Small models sometimes loop on the same tool forever.
 MAX_TOOL_ROUNDS = 2
-
-# Printed once at startup. Kept as plain ASCII/box-drawing so it survives any
-# terminal that can show the rest of the session; colour is added separately and
-# only when we are actually attached to a TTY.
-BANNER = r"""
-   ███████╗██╗   ██╗████████╗██╗   ██╗██████╗ ███████╗
-   ██╔════╝██║   ██║╚══██╔══╝██║   ██║██╔══██╗██╔════╝
-   █████╗  ██║   ██║   ██║   ██║   ██║██████╔╝█████╗
-   ██╔══╝  ██║   ██║   ██║   ██║   ██║██╔══██╗██╔══╝
-   ██║     ╚██████╔╝   ██║   ╚██████╔╝██║  ██║███████╗
-   ╚═╝      ╚═════╝    ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝
-      ██████╗ ███████╗ █████╗ ██████╗ ███████╗██████╗
-      ██╔══██╗██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗
-      ██████╔╝█████╗  ███████║██║  ██║█████╗  ██████╔╝
-      ██╔══██╗██╔══╝  ██╔══██║██║  ██║██╔══╝  ██╔══██╗
-      ██║  ██║███████╗██║  ██║██████╔╝███████╗██║  ██║
-      ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝
-"""
-
-TAROT_SPREAD = r"""
-          *      .          .         *        .
-           .---------.  .---------.  .---------.
-           |    *    |  | /\_^_// |  |    |    |
-           |  *   *  |  | \|===|  |  |  \ | /  |
-           | *  *  * |  |  |o o// |  |-- (o) --|
-           |  *   *  |  |  |o o|  |  |  / | \  |
-           |    *    |  |  |_n_|  |  |    |    |
-           |         |  |         |  |         |
-           |THE STAR |  |THE TOWER|  | THE SUN |
-           '---------'  '---------'  '---------'
-      .           *            .          *        .
-"""
 
 # Stands in for the matter of the reading when nobody has named one — a phrase
 # rather than "unknown", so the prompt still reads as a sentence.
@@ -244,6 +220,31 @@ class FutureReader:
         """The spread as lines of `position: card`."""
         return "\n".join(f"{position}: {card}" for position, card in self.spread)
 
+    # The three questions a reading is made of. They live on the reader rather
+    # than in each front end because they are not display strings: each one is
+    # formatted against state the reader owns (the topic, the cards turned so
+    # far), and a spread read one way in the terminal and another in the browser
+    # would be two different products.
+
+    def turn(self, position: str, card: str) -> str:
+        """Turn one card face up, and return the question that reads it.
+
+        Appending here is what makes the card visible to the prompt: until this
+        runs, `deck_block` still says the deck is wrapped. The card is passed in
+        rather than drawn here so the whole spread can be dealt in one go — see
+        `draw_spread` on why no card may repeat.
+        """
+        self.spread.append((position, card))
+        return CARD_QUESTION.format(position=position, card=card, topic=self.topic)
+
+    def closing_question(self) -> str:
+        """The question that ties the cards already turned into one prophecy."""
+        return CLOSING_QUESTION.format(cards=self.cards_text, topic=self.topic)
+
+    def sign_question(self) -> str:
+        """The question a reading of the stars opens with."""
+        return SIGN_QUESTION.format(topic=self.topic)
+
     def ask(self, question: str, *, remember: bool = True) -> str:
         """The whole answer at once, in one non-streaming request.
 
@@ -337,14 +338,18 @@ class FutureReader:
         return offer_deck
 
     def _trace_middleware(self) -> AgentMiddleware:
-        """Echo each draw to stderr under --verbose."""
+        """Echo each draw to stderr when tracing is on.
+
+        Plain text and stderr rather than the CLI's colours: this runs under the
+        web server too, where the only reader is a log file.
+        """
 
         @wrap_tool_call
         def trace(request, handler):
             result = handler(request)
             if self.trace_tools:
                 drawn = getattr(result, "text", result)
-                print(_paint(f"Card drawn: {drawn} \n", "31"), file=sys.stderr)
+                print(f"Card drawn: {drawn}", file=sys.stderr)
             return result
 
         return trace
@@ -369,117 +374,6 @@ class FutureReader:
         self.history.extend([HumanMessage(question), AIMessage(answer)])
 
 
-def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="FutureReader",
-        description=(
-            "Ask a local Ollama model or Mistral's API questions about files, "
-            "directories, and web pages."
-        ),
-    )
-    parser.add_argument(
-        "sources",
-        nargs="*",
-        help=(
-            "extra files, directories, or URLs to load, on top of the built-in "
-            f"ones ({', '.join(DEFAULT_SOURCES)})"
-        ),
-    )
-    parser.add_argument("-q", "--question", help="ask one question and exit")
-    parser.add_argument(
-        "--provider",
-        choices=models.PROVIDERS,
-        default=models.DEFAULT_PROVIDER,
-        help=(
-            "which backend answers (default: auto — Mistral when a key is in "
-            "the environment, the local Ollama model otherwise)"
-        ),
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help=(
-            "default: "
-            + ", ".join(
-                f"{name} on {provider}"
-                for provider, name in models.DEFAULT_MODELS.items()
-            )
-        ),
-    )
-    parser.add_argument(
-        "--num-ctx",
-        type=int,
-        default=None,
-        help=(
-            "context window in tokens (default: "
-            + ", ".join(
-                f"{size:,} on {provider}"
-                for provider, size in models.DEFAULT_NUM_CTX.items()
-            )
-            + "); on Mistral this only sets what the usage report counts against"
-        ),
-    )
-    parser.add_argument(
-        "--num-predict",
-        type=int,
-        default=DEFAULT_NUM_PREDICT,
-        help=f"tokens to generate, -1 for unlimited (default: {DEFAULT_NUM_PREDICT})",
-    )
-    parser.add_argument(
-        "--temperature", type=float, default=DEFAULT_TEMPERATURE, help=f"default: {DEFAULT_TEMPERATURE}"
-    )
-    parser.add_argument(
-        "--base-url",
-        default=None,
-        help="Ollama server, default $OLLAMA_HOST (ignored on Mistral)",
-    )
-    parser.add_argument("--no-stream", action="store_true", help="wait for the full answer")
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="report context-window usage at startup and after every answer",
-    )
-    return parser.parse_args(argv)
-
-
-def _report_context(reader: FutureReader, verbose: bool = False) -> None:
-    """Print how full the context window is, and warn when it is nearly gone.
-
-    The usage line is opt-in via --verbose; the truncation warning is not,
-    since a silently cut prompt is worth knowing about either way.
-    """
-    estimate = reader.used_tokens()
-    left = reader.num_ctx - estimate
-    ratio = estimate / reader.num_ctx if reader.num_ctx else 0
-    if verbose:
-        filled = int(ratio * 20)
-        bar = "#" * min(filled, 20) + "." * max(20 - filled, 0)
-        print(
-            f"context: [{bar}] ~{estimate:,} / {reader.num_ctx:,} tokens "
-            f"· {left:,} left ({ratio:.0%} used)",
-            file=sys.stderr,
-        )
-    if ratio > 0.8 and verbose:
-        truncates = models.truncates_silently(reader.provider)
-        print(
-            "warning: the prompt is close to --num-ctx. "
-            + (
-                "Ollama will silently truncate it — "
-                if truncates
-                else "The server may refuse it — "
-            )
-            + "raise --num-ctx, load fewer sources, or restart to drop the history.",
-            file=sys.stderr,
-        )
-
-
-def _show_error_hint(exc: Exception, reader: FutureReader) -> None:
-    """Turn each backend's usual failure into something actionable."""
-    hint = models.error_hint(exc, reader.provider, reader.model)
-    if hint:
-        print(hint, file=sys.stderr)
-
 ZODIAC_GLYPHS = {
     "Aries": "♈",
     "Taurus": "♉",
@@ -496,38 +390,13 @@ ZODIAC_GLYPHS = {
 }
 
 
-def _paint(text: str, code: str, stream=sys.stderr) -> str:
-    """Wrap text in an ANSI colour, but only when someone is there to see it.
+def sign_for(birth_date: date) -> str:
+    """The zodiac sign a birth date falls under.
 
-    Piping the banner into a file or another program should not litter it with
-    escape sequences, so anything that is not a TTY gets the plain text back.
+    Pure on purpose: the terminal asks for the date with `input`, the API gets
+    it parsed out of JSON, and neither of those belongs anywhere near the table
+    of cusps below.
     """
-    if not stream.isatty():
-        return text
-    return f"\033[{code}m{text}\033[0m"
-
-
-def _print_banner() -> None:
-    """Curtain-raiser for the session: title, a spread, and a line of flavour."""
-    print(_paint(BANNER, "1;35"), file=sys.stderr)
-    print(_paint(TAROT_SPREAD, "36"), file=sys.stderr)
-    print(
-        _paint("        ~ the mists part · ask, and the future answers ~\n", "2;37"),
-        file=sys.stderr,
-    )
-
-
-def get_horoscope_sign() -> str:
-    """Return the user's horoscope sign based on their birth date."""
-    from datetime import datetime
-
-    birth_date_str = input("Enter your birth date (YYYY-MM-DD): ")
-    try:
-        birth_date = datetime.strptime(birth_date_str, "%Y-%m-%d")
-    except ValueError:
-        print("Invalid date format. Please use YYYY-MM-DD.")
-        return get_horoscope_sign()
-
     month = birth_date.month
     day = birth_date.day
 
@@ -561,20 +430,6 @@ def get_horoscope_sign() -> str:
 READING_CARDS = "cards"
 READING_SIGN = "sign"
 
-# What the opening menu accepts for each reading. The number is the documented
-# way in; the words are there so someone who types "cartas" or "tarot" instead
-# of "1" is not told they answered wrong.
-READING_WORDS = {
-    READING_CARDS: {
-        "1", "cards", "card", "tarot", "spread",
-        "cartas", "carta", "tirada", "baraja",
-    },
-    READING_SIGN: {
-        "2", "sign", "horoscope", "zodiac", "stars",
-        "signo", "horoscopo", "zodiaco", "astros",
-    },
-}
-
 # The question the sign reading opens with.
 SIGN_QUESTION = (
     "I have come to ask about this: {topic}\n"
@@ -602,140 +457,3 @@ CLOSING_QUESTION = (
     "{cards}\n"
     "Tie the cards together into one prophecy, and name no other."
 )
-
-
-def ask_topic() -> str:
-    """Ask what the reading is about, before a single card is turned.
-
-    Taken in the querent's own words rather than from a menu: it goes into the
-    prompt as-is, and a vague answer makes for a vague prophecy either way.
-    """
-    while True:
-        topic = input("What would you have the future speak of? ").strip()
-        if topic:
-            return topic
-        print("Name the matter you come for.", file=sys.stderr)
-
-
-def choose_reading() -> str:
-    """Ask which of the two readings the person has come for."""
-    print(_paint("  1) A spread of three cards", "36"), file=sys.stderr)
-    print(_paint("  2) A reading of your sign\n", "36"), file=sys.stderr)
-    while True:
-        choice = input("What do you seek? [1/2] ").strip().lower()
-        for reading, words in READING_WORDS.items():
-            if choice in words:
-                return reading
-        print("Answer 1 or 2.", file=sys.stderr)
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    _print_banner()
-
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-    except ImportError:
-        pass  # python-dotenv is optional; the env var may already be set.
-
-    args = _parse_args(argv)
-
-    try:
-        reader = FutureReader(
-            provider=args.provider,
-            model=args.model,
-            num_ctx=args.num_ctx,
-            num_predict=args.num_predict,
-            temperature=args.temperature,
-            base_url=args.base_url,
-            trace_tools=args.verbose,
-        )
-    except (ValueError, ImportError) as exc:
-        # A missing key or a backend whose package was never installed. Both
-        # are fixed before the session starts, not during it.
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if args.verbose:
-        print(
-            f"Reading with {reader.model} on {reader.provider}\n", file=sys.stderr
-        )
-
-    refs = list(DEFAULT_SOURCES)
-    refs.extend(args.sources)
-
-    try:
-        reader.add(refs)
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if args.verbose:
-        print(f"Loaded {describe(reader.documents)}\n", file=sys.stderr)
-
-    # Both readings are given through the querent's sign, so the birth date is
-    # asked for either way, and both are read upon the matter they come with —
-    # which is why the topic is asked for before the deck is touched below.
-    # Walking out at any of these prompts is not an error.
-    try:
-        reading = choose_reading()
-        if reading == READING_CARDS:
-            reader.topic = ask_topic()
-        if reading == READING_SIGN:
-            reader.sign = get_horoscope_sign()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return 0
-    if reading == READING_SIGN:
-        glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
-        print(_paint(f"Your sign: {glyph}  {reader.sign}", "1;33"), file=sys.stderr)
-    if reading == READING_CARDS:
-        print(_paint(f"You seek: {reader.topic}\n", "1;33"), file=sys.stderr)
-
-    _report_context(reader, args.verbose)
-
-    def answer(question: str) -> None:
-        try:
-            if args.no_stream:
-                print(reader.ask(question))
-            else:
-                for chunk in reader.stream(question):
-                    print(chunk, end="", flush=True)
-                print()
-        except Exception as exc:  # noqa: BLE001 - surface anything the server says
-            print(f"\nerror: {exc}", file=sys.stderr)
-            _show_error_hint(exc, reader)
-            return
-        _report_context(reader, args.verbose)
-
-    # The reading the person chose, given before they say anything themselves.
-    if reading == READING_CARDS:
-        # The whole spread is dealt in one call, so no card can repeat, but the
-        # cards are turned over one at a time: each is printed, read on its own,
-        # and only then added to what the prompt admits is on the table.
-        for position, card in draw_spread():
-            print(_paint(f"\n  {position} — {card}\n", "1;35"), file=sys.stderr)
-            reader.spread.append((position, card))
-            answer(
-                CARD_QUESTION.format(
-                    position=position, card=card, topic=reader.topic
-                )
-            )
-        answer(CLOSING_QUESTION.format(cards=reader.cards_text, topic=reader.topic))
-    else:
-        answer(SIGN_QUESTION.format(topic=reader.topic))
-
-    print("\nAsk a question (Ctrl-D or 'exit' to quit).")
-    while True:
-        try:
-            question = input("\n> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if question.lower() in {"exit", "quit"}:
-            return 0
-        if question:
-            answer(question)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
