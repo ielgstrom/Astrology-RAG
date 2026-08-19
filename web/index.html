@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FutureReader</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <h1>Future reader</h1>
+    <p class="intro">
+      Las cartas están te esperan, tu camino se abre ante ti.
+    </p>
+
+    <form id="apertura">
+      <div class="campo">
+        <label for="birth_date">Fecha de nacimiento</label>
+        <p class="ayuda">De ella se sigue tu signo, y todo se lee a través de él.</p>
+        <input type="date" id="birth_date" name="birth_date" required>
+      </div>
+
+      <div class="campo">
+        <label for="topic">Sobre qué quieres preguntar</label>
+        <p class="ayuda">El amor, el trabajo, un camino que no acaba de abrirse…</p>
+        <input type="text" id="topic" name="topic" required
+               placeholder="El asunto que te trae" maxlength="120">
+      </div>
+
+      <button type="submit">Repartir las cartas</button>
+    </form>
+  </main>
+
+  <script src="niebla.js" defer></script>
+
+  <script>
+    // Provisional: sin esto el formulario recarga la página al enviarse. Cuando
+    // exista app.js, este bloque se sustituye por la llamada a POST /sessions.
+    document.getElementById("apertura").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const datos = Object.fromEntries(new FormData(e.target));
+      console.log("Aún sin enviar a la API:", datos);
+    });
+  </script>
+</body>
+</html>

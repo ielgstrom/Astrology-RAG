@@ -1,8 +1,7 @@
 # FutureReader
 
-Una vidente en la terminal. Preguntale por tu horóscopo o por lo que te espera y
-te responderá como toda buena adivina: en tono misterioso y sin concretar
-demasiado.
+Una vidente en la terminal. Te echa las cartas y te responde como toda buena
+adivina: en tono misterioso y sin concretar demasiado.
 
 Funciona con dos motores, y elige solo:
 
@@ -40,16 +39,10 @@ ollama pull llama3.2    # o el modelo que prefieras
 ```sh
 python cli.py
 ```
-Lo primero que te preguntará es qué lectura quieres:
-
-```
-  1) A spread of three cards
-  2) A reading of your sign
-```
-
-Con **1** reparte tres cartas (pasado / presente / futuro) y construye la lectura
-sobre ellas. Con **2** lee lo que dicen los astros para tu signo. En ambos casos
-te pedirá la fecha de nacimiento, porque toda profecía se lee a través del signo.
+Primero te pedirá la fecha de nacimiento —toda profecía se lee a través de tu
+signo— y después qué quieres que te digan las cartas. Con eso reparte tres
+cartas (pasado / presente / futuro), las va volteando de una en una y al final
+las ata en una sola profecía.
 
 Después te conducirá a un chat con la vidente, donde puedes seguir preguntando.
 Para acabar con el chat puedes escribir:
@@ -83,7 +76,7 @@ uvicorn api:app --reload
 | Endpoint | Qué hace |
 | --- | --- |
 | `GET /health` | qué motor respondería ahora mismo |
-| `POST /sessions` | abre una lectura (`reading`, `topic`, `birth_date`) y devuelve el `session_id`, el signo y las cartas repartidas |
+| `POST /sessions` | abre una lectura (`topic`, `birth_date`) y devuelve el `session_id`, el signo y las cartas repartidas |
 | `GET /sessions/{id}/reading` | la lectura entera en streaming (SSE) |
 | `GET /sessions/{id}/ask?q=…` | una pregunta libre, también en streaming |
 

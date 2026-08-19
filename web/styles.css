@@ -1,0 +1,200 @@
+:root {
+  /* Las mueve niebla.js; con el JS desactivado se quedan en estos valores y
+     la niebla sigue funcionando, solo que sin reaccionar. */
+  --niebla-x: 0.5;
+  --niebla-y: 0.5;
+  --niebla-densidad: 0.8;
+  --niebla-remolino: 1;
+
+  --fondo: #0f0d17;
+  --fondo-panel: #171327;
+  --borde: #2e2745;
+  --texto: #e6e1f0;
+  --tenue: #9d94b8;
+  --oro: #d9b26a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  background: var(--fondo);
+  color: var(--texto);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.6;
+}
+
+main {
+  width: 100%;
+  max-width: 34rem;
+}
+
+/* La introducción: quién lee las cartas, antes de pedir nada. */
+.glifos {
+  color: var(--oro);
+  font-size: 1.5rem;
+  letter-spacing: 0.6rem;
+  text-align: center;
+  opacity: 0.7;
+}
+
+h1 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: normal;
+  font-size: 2.4rem;
+  text-align: center;
+  margin: 0.5rem 0 1rem;
+}
+
+.intro {
+  color: var(--tenue);
+  text-align: center;
+  margin: 0 0 2.5rem;
+}
+
+form {
+  background: var(--fondo-panel);
+  border: 1px solid var(--borde);
+  border-radius: 0.75rem;
+  padding: 2rem;
+}
+
+label {
+  display: block;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--tenue);
+  margin-bottom: 0.5rem;
+}
+
+/* La ayuda va debajo de la etiqueta y encima del campo: se lee antes de
+   escribir, no después de haberse equivocado. */
+.ayuda {
+  font-size: 0.85rem;
+  color: var(--tenue);
+  margin: -0.25rem 0 0.6rem;
+}
+
+input {
+  width: 100%;
+  padding: 0.75rem;
+  background: var(--fondo);
+  border: 1px solid var(--borde);
+  border-radius: 0.4rem;
+  color: var(--texto);
+  font: inherit;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--oro);
+}
+
+.campo + .campo { margin-top: 1.75rem; }
+
+button {
+  width: 100%;
+  margin-top: 2rem;
+  padding: 0.9rem;
+  background: var(--oro);
+  border: none;
+  border-radius: 0.4rem;
+  color: #1a1408;
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+button:hover { background: #e8c483; }
+
+/* ---------------------------------------------------------------------------
+   Niebla de fondo. Dos capas de gradientes radiales muy difusos que derivan a
+   distinta velocidad y en sentidos opuestos: al cruzarse se espesan y se
+   aclaran solas, sin que el ciclo se note. Sin imágenes: solo gradientes. La
+   reacción al puntero la añade niebla.js escribiendo --niebla-*.
+   --------------------------------------------------------------------------- */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  /* Más grandes que la pantalla: así el borde de la capa nunca entra en
+     cuadro cuando se desplaza. */
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  pointer-events: none;
+  z-index: 0;
+  /* `translate` y `scale` son propiedades aparte de `transform`, y se aplican
+     antes que él: la reacción al puntero se suma a la deriva de los keyframes
+     sin que ninguna de las dos pise a la otra. */
+  scale: var(--niebla-remolino);
+  opacity: var(--niebla-densidad);
+  transition: opacity 1.8s ease, scale 2.4s ease;
+}
+
+body::before {
+  background:
+    radial-gradient(38% 28% at 22% 32%, rgba(157, 148, 184, 0.20), transparent 70%),
+    radial-gradient(30% 22% at 72% 24%, rgba(217, 178, 106, 0.10), transparent 70%),
+    radial-gradient(46% 30% at 58% 74%, rgba(120, 110, 165, 0.18), transparent 70%);
+  animation: deriva-humo 48s ease-in-out infinite alternate;
+  /* Contra el puntero, y menos que la otra capa: la de delante se mueve más,
+     y esa diferencia es la que da la sensación de profundidad. */
+  translate: calc((var(--niebla-x) - 0.5) * -42px)
+             calc((var(--niebla-y) - 0.5) * -26px);
+}
+
+body::after {
+  background:
+    radial-gradient(42% 26% at 78% 62%, rgba(157, 148, 184, 0.16), transparent 70%),
+    radial-gradient(34% 26% at 30% 78%, rgba(217, 178, 106, 0.08), transparent 70%),
+    radial-gradient(38% 24% at 46% 14%, rgba(120, 110, 165, 0.16), transparent 70%);
+  animation: deriva-humo-inversa 67s ease-in-out infinite alternate;
+  translate: calc((var(--niebla-x) - 0.5) * 74px)
+             calc((var(--niebla-y) - 0.5) * 46px);
+}
+
+@keyframes deriva-humo {
+  from { transform: translate3d(-4%, 2%, 0) scale(1);    filter: opacity(0.75); }
+  50%  { transform: translate3d(3%, -3%, 0) scale(1.15); filter: opacity(1); }
+  to   { transform: translate3d(5%, 4%, 0) scale(1.05);  filter: opacity(0.8); }
+}
+
+@keyframes deriva-humo-inversa {
+  from { transform: translate3d(4%, -3%, 0) scale(1.1);  filter: opacity(0.9); }
+  50%  { transform: translate3d(-3%, 3%, 0) scale(1);    filter: opacity(0.65); }
+  to   { transform: translate3d(-5%, -2%, 0) scale(1.2); filter: opacity(0.95); }
+}
+
+/* El contenido, por encima de la niebla. */
+main { position: relative; z-index: 1; }
+
+/* Si el sistema pide menos movimiento, la niebla se queda quieta pero sigue
+   estando: se pierde la deriva, no la atmósfera. */
+@media (prefers-reduced-motion: reduce) {
+  body::before,
+  body::after {
+    animation: none;
+    translate: none;
+    scale: none;
+    transition: none;
+  }
+}
+
+/* Mientras se escribe la niebla se espesa; al repartir las cartas se revuelve
+   y vuelve sola a su sitio. Los dos estados son solo variables: lo que anima
+   es siempre opacity y scale, nunca los gradientes. */
+:root.niebla-densa { --niebla-densidad: 1; }
+
+:root.niebla-revuelta {
+  --niebla-densidad: 1;
+  --niebla-remolino: 1.3;
+}

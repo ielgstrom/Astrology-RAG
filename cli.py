@@ -1,7 +1,7 @@
 """The reader as a terminal session.
 
 Everything here is about the terminal and nothing else: the banner, the colours,
-the menu, and the questions asked with `input`. The reading itself belongs to
+and the questions asked with `input`. The reading itself belongs to
 `FutureReader`, which this only drives — `api.py` drives the same object over
 HTTP without repeating a line of it.
 
@@ -22,8 +22,6 @@ from FutureReader import (
     DEFAULT_NUM_PREDICT,
     DEFAULT_SOURCES,
     DEFAULT_TEMPERATURE,
-    READING_CARDS,
-    READING_SIGN,
     ZODIAC_GLYPHS,
     FutureReader,
     sign_for,
@@ -62,21 +60,6 @@ TAROT_SPREAD = r"""
            '---------'  '---------'  '---------'
       .           *            .          *        .
 """
-
-# What the opening menu accepts for each reading. The number is the documented
-# way in; the words are there so someone who types "cartas" or "tarot" instead
-# of "1" is not told they answered wrong.
-READING_WORDS = {
-    READING_CARDS: {
-        "1", "cards", "card", "tarot", "spread",
-        "cartas", "carta", "tirada", "baraja",
-    },
-    READING_SIGN: {
-        "2", "sign", "horoscope", "zodiac", "stars",
-        "signo", "horoscopo", "zodiaco", "astros",
-    },
-}
-
 
 def _paint(text: str, code: str, stream=sys.stderr) -> str:
     """Wrap text in an ANSI colour, but only when someone is there to see it.
@@ -236,18 +219,6 @@ def ask_topic() -> str:
         print("Name the matter you come for.", file=sys.stderr)
 
 
-def choose_reading() -> str:
-    """Ask which of the two readings the person has come for."""
-    print(_paint("  1) A spread of three cards", "36"), file=sys.stderr)
-    print(_paint("  2) A reading of your sign\n", "36"), file=sys.stderr)
-    while True:
-        choice = input("What do you seek? [1/2] ").strip().lower()
-        for reading, words in READING_WORDS.items():
-            if choice in words:
-                return reading
-        print("Answer 1 or 2.", file=sys.stderr)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     _print_banner()
 
@@ -291,24 +262,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.verbose:
         print(f"Loaded {describe(reader.documents)}\n", file=sys.stderr)
 
-    # Both readings are given through the querent's sign, so the birth date is
-    # asked for either way, and both are read upon the matter they come with —
-    # which is why the topic is asked for before the deck is touched below.
-    # Walking out at any of these prompts is not an error.
+    # The spread is read through the querent's sign and upon the matter they
+    # come with, so both are settled before the deck is touched below. Walking
+    # out at either prompt is not an error.
     try:
-        reading = choose_reading()
-        if reading == READING_CARDS:
-            reader.topic = ask_topic()
-        if reading == READING_SIGN:
-            reader.sign = get_horoscope_sign()
+        reader.sign = get_horoscope_sign()
+        reader.topic = ask_topic()
     except (EOFError, KeyboardInterrupt):
         print()
         return 0
-    if reading == READING_SIGN:
-        glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
-        print(_paint(f"Your sign: {glyph}  {reader.sign}", "1;33"), file=sys.stderr)
-    if reading == READING_CARDS:
-        print(_paint(f"You seek: {reader.topic}\n", "1;33"), file=sys.stderr)
+    glyph = ZODIAC_GLYPHS.get(reader.sign, "✦")
+    print(_paint(f"Your sign: {glyph}  {reader.sign}", "1;33"), file=sys.stderr)
+    print(_paint(f"You seek: {reader.topic}\n", "1;33"), file=sys.stderr)
 
     _report_context(reader, args.verbose)
 
@@ -326,18 +291,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return
         _report_context(reader, args.verbose)
 
-    # The reading the person chose, given before they say anything themselves.
-    if reading == READING_CARDS:
-        # The whole spread is dealt in one call, so no card can repeat, but the
-        # cards are turned over one at a time: each is printed, read on its own,
-        # and only then added to what the prompt admits is on the table — which
-        # is what `reader.turn` does before handing back the question.
-        for position, card in draw_spread():
-            print(_paint(f"\n  {position} — {card}\n", "1;35"), file=sys.stderr)
-            answer(reader.turn(position, card))
-        answer(reader.closing_question())
-    else:
-        answer(reader.sign_question())
+    # The reading, given before they say anything themselves. The whole spread
+    # is dealt in one call, so no card can repeat, but the cards are turned over
+    # one at a time: each is printed, read on its own, and only then added to
+    # what the prompt admits is on the table — which is what `reader.turn` does
+    # before handing back the question.
+    for position, card in draw_spread():
+        print(_paint(f"\n  {position} — {card}\n", "1;35"), file=sys.stderr)
+        answer(reader.turn(position, card))
+    answer(reader.closing_question())
 
     print("\nAsk a question (Ctrl-D or 'exit' to quit).")
     while True:

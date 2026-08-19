@@ -169,7 +169,7 @@ class FutureReader:
         self.topic: str = DEFAULT_TOPIC
         # Cards already turned face up, as (position, card) pairs, in the order
         # they were revealed. Grows one card at a time as the reading is given,
-        # and stays empty when the querent came for a reading of their sign.
+        # and is empty only until the first card is turned.
         self.spread: list[tuple[str, str]] = []
         self.agent = create_agent(
             self.llm,
@@ -220,7 +220,7 @@ class FutureReader:
         """The spread as lines of `position: card`."""
         return "\n".join(f"{position}: {card}" for position, card in self.spread)
 
-    # The three questions a reading is made of. They live on the reader rather
+    # The two questions a reading is made of. They live on the reader rather
     # than in each front end because they are not display strings: each one is
     # formatted against state the reader owns (the topic, the cards turned so
     # far), and a spread read one way in the terminal and another in the browser
@@ -240,10 +240,6 @@ class FutureReader:
     def closing_question(self) -> str:
         """The question that ties the cards already turned into one prophecy."""
         return CLOSING_QUESTION.format(cards=self.cards_text, topic=self.topic)
-
-    def sign_question(self) -> str:
-        """The question a reading of the stars opens with."""
-        return SIGN_QUESTION.format(topic=self.topic)
 
     def ask(self, question: str, *, remember: bool = True) -> str:
         """The whole answer at once, in one non-streaming request.
@@ -426,15 +422,6 @@ def sign_for(birth_date: date) -> str:
         return "Pisces"
     return "unknown"
 
-
-READING_CARDS = "cards"
-READING_SIGN = "sign"
-
-# The question the sign reading opens with.
-SIGN_QUESTION = (
-    "I have come to ask about this: {topic}\n"
-    "Read what my sign says of it in the days ahead."
-)
 
 # Asked once per card, as it is turned. Like the spread block in the system
 # prompt, this repeats the card verbatim: with a whole PDF of sources in

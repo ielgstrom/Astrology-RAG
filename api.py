@@ -1,7 +1,7 @@
 """The reader over HTTP.
 
-The shape of a session is the same one the terminal has always had: pick a
-reading, say what you come to ask about, and then the prophecy arrives a word at
+The shape of a session is the same one the terminal has always had: say who you
+are and what you come to ask about, and then the prophecy arrives a word at
 a time. What changes is that the words travel over Server-Sent Events instead of
 straight to stdout, and that several querents may be mid-reading at once.
 
@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
-from typing import Callable, Iterable, Iterator, Literal
+from typing import Callable, Iterable, Iterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -28,8 +29,6 @@ from sse_starlette.sse import EventSourceResponse
 import models
 from FutureReader import (
     DEFAULT_SOURCES,
-    READING_CARDS,
-    READING_SIGN,
     ZODIAC_GLYPHS,
     FutureReader,
     sign_for,
@@ -52,10 +51,9 @@ DOCUMENTS = load_sources(DEFAULT_SOURCES, quiet=True)
 
 @dataclass
 class Session:
-    """One querent's reading, from the opening menu to the last question."""
+    """One querent's reading, from the first card to the last question."""
 
     reader: FutureReader
-    reading: str
     # Dealt at once when the session opens, so no card can repeat, but handed to
     # the reader one at a time while the prophecy is streamed. The browser gets
     # them here too — face down is still something to draw on screen.
@@ -73,12 +71,10 @@ SESSIONS: dict[str, Session] = {}
 
 
 class NewSession(BaseModel):
-    reading: Literal["cards", "sign"]
     topic: str = Field(min_length=1)
-    # Only the stars need it. A card reading is given through the sign as well,
-    # but the terminal has never asked for a date on that path, so neither does
-    # this: without one the sign stays "unknown" exactly as it does there.
-    birth_date: date | None = None
+    # Required, as it is in the terminal: every card is read through the
+    # querent's sign, so there is no reading to give without a date.
+    birth_date: date
 
 
 def _session(session_id: str) -> Session:
@@ -130,7 +126,7 @@ def _stream(session: Session, steps: Iterable[Step]) -> Iterator[dict[str, str]]
 def health() -> dict[str, str]:
     """Which backend would answer if a question arrived right now."""
     provider = models.resolve_provider()
-    logging.info("Health check: nonsense")
+    logging.warning("Health check: nonsense")
     return {"status": "ok", "provider": provider, "model": models.default_model(provider)}
 
 
@@ -144,22 +140,14 @@ def open_session(new: NewSession) -> dict:
     reader = FutureReader()
     reader.documents = list(DOCUMENTS)
     reader.topic = new.topic
+    reader.sign = sign_for(new.birth_date)
 
-    session = Session(reader=reader, reading=new.reading)
-    if new.reading == READING_SIGN:
-        if new.birth_date is None:
-            raise HTTPException(
-                status_code=422, detail="A reading of the stars needs a birth date."
-            )
-        reader.sign = sign_for(new.birth_date)
-    else:
-        session.cards = draw_spread()
+    session = Session(reader=reader, cards=draw_spread())
 
     session_id = uuid.uuid4().hex
     SESSIONS[session_id] = session
     return {
         "session_id": session_id,
-        "reading": session.reading,
         "sign": reader.sign,
         "glyph": ZODIAC_GLYPHS.get(reader.sign, "✦"),
         "cards": [{"position": p, "card": c} for p, c in session.cards],
@@ -177,13 +165,10 @@ def reading(session_id: str) -> EventSourceResponse:
     """
     session = _session(session_id)
 
-    if session.reading == READING_CARDS:
-        steps: list[Step] = [
-            (card, partial(session.reader.turn, *card)) for card in session.cards
-        ]
-        steps.append((None, session.reader.closing_question))
-    else:
-        steps = [(None, session.reader.sign_question)]
+    steps: list[Step] = [
+        (card, partial(session.reader.turn, *card)) for card in session.cards
+    ]
+    steps.append((None, session.reader.closing_question))
 
     return EventSourceResponse(_stream(session, steps))
 
